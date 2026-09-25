@@ -2,7 +2,9 @@
   "_comment": "Copy to ~/.pi/research.config.json (recommended) or .pi/research.config.json in a project. API key: use /research key in Pi, or BRAVE_API_KEY env (env wins). Never commit apiKey to git.",
   "enabled": true,
   "maxResults": 5,
-  "maxContentChars": 5000,
+  "maxContentChars": 2500,
+  "contentResults": 2,
+  "maxPageChars": 8000,
   "includeContentDefault": true,
   "fetchTimeoutMs": 15000,
   "defaultCountry": "US"

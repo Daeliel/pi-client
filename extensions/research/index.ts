@@ -82,7 +82,7 @@ export default function (pi: ExtensionAPI) {
       query: Type.String({ description: "Search query — include framework and symbol names." }),
       maxResults: Type.Optional(Type.Number({ description: "1–20 results (default from config)." })),
       includeContent: Type.Optional(
-        Type.Boolean({ description: "Fetch readable page text for each result (default true)." }),
+        Type.Boolean({ description: "Fetch readable page text for the top results (default true). Use fetch_web_page for more of one page." }),
       ),
       freshness: Type.Optional(
         Type.String({

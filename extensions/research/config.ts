@@ -8,7 +8,12 @@ export interface ResearchConfig {
   /** Stored in ~/.pi/research.config.json via /research key — env BRAVE_API_KEY wins if set. */
   apiKey?: string;
   maxResults: number;
+  /** Page text per search result (only the top `contentResults` get any). */
   maxContentChars: number;
+  /** How many of the top search results get their page text fetched. The rest are title + snippet. */
+  contentResults: number;
+  /** Page text limit for fetch_web_page — one page the model chose, so it may be longer. */
+  maxPageChars: number;
   includeContentDefault: boolean;
   fetchTimeoutMs: number;
   defaultCountry: string;
@@ -17,7 +22,9 @@ export interface ResearchConfig {
 export const DEFAULT_CONFIG: ResearchConfig = {
   enabled: true,
   maxResults: 5,
-  maxContentChars: 5000,
+  maxContentChars: 2500,
+  contentResults: 2,
+  maxPageChars: 8000,
   includeContentDefault: true,
   fetchTimeoutMs: 15000,
   defaultCountry: "US",
