@@ -45,12 +45,12 @@ import { listVisionModels, resolveCriticModel, runCriticCompletion } from "./cri
 import { presentVisionToSession } from "../shared/vision-relay";
 import { loadConfig as loadScenariosConfig } from "../scenarios/config";
 import { capturePageScreenshot, loadVisionImages, type VisionImageContent } from "../scenarios/vision";
-import { isGateClaimed, resetGateClaim, tryClaimGate } from "../shared/gate-orchestrator";
+import { isGateClaimed, resetGateClaim, tryClaimGate, registerGateReset } from "../shared/gate-orchestrator";
+import { extractEditPath, isEditTool } from "../shared/edit-tools";
 import { registerOnceModifier } from "../shared/once";
 import { detectStacks, isWebPath } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
 
-const EDIT_TOOLS = new Set(["write", "edit", "create", "multiedit", "apply_patch", "str_replace"]);
 const STATE_TYPE = "foundation-polish-state";
 const WIDGET_KEY = "polish";
 
@@ -86,16 +86,6 @@ interface TaskState {
   skippedNotice: boolean;
 }
 
-function extractPath(input: unknown): string | null {
-  if (!input || typeof input !== "object") return null;
-  const obj = input as Record<string, unknown>;
-  for (const key of ["path", "file_path", "filePath", "filename", "file"]) {
-    const v = obj[key];
-    if (typeof v === "string" && v.length > 0) return v;
-  }
-  return null;
-}
-
 /** UI source files only — never specs, tests, or anything under .pi/. */
 function isPolishableUiFile(p: string): boolean {
   const n = p.replace(/\\/g, "/").toLowerCase();
@@ -114,6 +104,7 @@ function shorten(s: string, n: number): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  registerGateReset(pi);
   let configCache: PolishConfig | null = null;
   let sessionLevel: PolishSetting | null = null;
   let promptLevel: PolishLevel | null = null;
@@ -348,8 +339,8 @@ export default function (pi: ExtensionAPI) {
     const config = cfg(ctx);
     if (!config.enabled) return;
 
-    if (EDIT_TOOLS.has(event.toolName)) {
-      const p = extractPath(event.input);
+    if (isEditTool(event.toolName)) {
+      const p = extractEditPath(event.input);
       if (!p || event.isError) return;
       editSerial += 1;
       if (!isPolishableUiFile(p)) return;

@@ -13,26 +13,16 @@ import { loadConfig as loadScenariosConfig } from "../scenarios/config";
 import { buildPlaywrightConfigTemplate } from "../scenarios/templates";
 import { capturePageScreenshot, loadVisionImages } from "../scenarios/vision";
 import { presentVisionToSession } from "../shared/vision-relay";
-import { resetGateClaim, tryClaimGate, isGateClaimed } from "../shared/gate-orchestrator";
+import { resetGateClaim, tryClaimGate, isGateClaimed, registerGateReset } from "../shared/gate-orchestrator";
+import { extractEditPath, isEditTool } from "../shared/edit-tools";
 import { detectStacks, shouldInjectWebProcedure } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
 
-const EDIT_TOOLS = new Set(["write", "edit", "create", "multiedit", "apply_patch", "str_replace"]);
 const STATE_TYPE = "foundation-browser-console-state";
 
 interface PersistedState {
   changedWebFiles?: string[];
   fixAttempts?: number;
-}
-
-function extractPath(input: unknown): string | null {
-  if (!input || typeof input !== "object") return null;
-  const obj = input as Record<string, unknown>;
-  for (const key of ["path", "file_path", "filePath", "filename", "file"]) {
-    const v = obj[key];
-    if (typeof v === "string" && v.length > 0) return v;
-  }
-  return null;
 }
 
 function failureEntries(browser: CdpBrowser, config: BrowserConsoleConfig): ConsoleEntry[] {
@@ -49,6 +39,7 @@ function ensureMinimalPlaywrightConfig(cwd: string): void {
 }
 
 export default function (pi: ExtensionAPI) {
+  registerGateReset(pi);
   const browser = new CdpBrowser();
   const changedWebFiles = new Set<string>();
   let fixAttempts = 0;
@@ -176,9 +167,9 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_result", async (event, ctx) => {
     const config = cfg(ctx);
-    if (!config.enabled || !config.checkOnEdit || !EDIT_TOOLS.has(event.toolName)) return;
+    if (!config.enabled || !config.checkOnEdit || !isEditTool(event.toolName)) return;
 
-    const p = extractPath(event.input);
+    const p = extractEditPath(event.input);
     if (!p || !isWebFile(p)) return;
 
     if (!changedWebFiles.has(p)) {

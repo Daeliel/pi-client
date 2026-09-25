@@ -53,7 +53,9 @@
     "typescript": "^7.0.2"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "test": "tsx --test extensions/**/*.test.ts"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
+    "test": "tsx --tsconfig test/tsconfig.json --test extensions/**/*.test.ts test/*.it.ts",
+    "test:unit": "tsx --tsconfig test/tsconfig.json --test extensions/**/*.test.ts",
+    "test:it": "tsx --tsconfig test/tsconfig.json --test test/*.it.ts"
   }
 }

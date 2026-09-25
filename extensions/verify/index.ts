@@ -3,12 +3,11 @@ import { Type } from "typebox";
 import { loadConfig, type VerifyConfig } from "./config";
 import { verify, formatReport, toolchainStatus } from "./engine";
 import { OPERATING_PROCEDURE } from "./procedure";
-import { resetGateClaim, tryClaimGate } from "../shared/gate-orchestrator";
+import { resetGateClaim, tryClaimGate, registerGateReset } from "../shared/gate-orchestrator";
+import { extractEditPath, isEditTool } from "../shared/edit-tools";
 import { classifyVerifyFailure, formatClassifiedFailure } from "../shared/failure-classify";
 import { detectStacks, formatStackDoctorLines } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
-
-const EDIT_TOOLS = new Set(["write", "edit", "create", "multiedit", "apply_patch", "str_replace"]);
 
 /** Custom session-entry type used to persist verify state across /resume + reload. */
 const STATE_TYPE = "foundation-verify-state";
@@ -18,18 +17,9 @@ interface PersistedState {
   fixAttempts?: number;
 }
 
-/** Pull a file path out of an edit/write tool input, whatever the field is named. */
-function extractPath(input: unknown): string | null {
-  if (!input || typeof input !== "object") return null;
-  const obj = input as Record<string, unknown>;
-  for (const key of ["path", "file_path", "filePath", "filename", "file"]) {
-    const v = obj[key];
-    if (typeof v === "string" && v.length > 0) return v;
-  }
-  return null;
-}
-
 export default function (pi: ExtensionAPI) {
+  registerGateReset(pi);
+
   // Per-session state.
   const changedFiles = new Set<string>();
   let fixAttempts = 0;
@@ -90,8 +80,8 @@ export default function (pi: ExtensionAPI) {
 
   // 2) Auto-verify (lint only) after each edit, returned inline as the edit's result.
   pi.on("tool_result", async (event, ctx) => {
-    if (!EDIT_TOOLS.has(event.toolName)) return;
-    const p = extractPath(event.input);
+    if (!isEditTool(event.toolName)) return;
+    const p = extractEditPath(event.input);
     if (p && !changedFiles.has(p)) {
       changedFiles.add(p);
       persist();

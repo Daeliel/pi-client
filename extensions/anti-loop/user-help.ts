@@ -1,9 +1,5 @@
-/** Tools that count as progress (not approach-churn). Keep in sync with polish/expand. */
-const EDIT_TOOLS = new Set(["write", "edit", "create", "multiedit", "apply_patch", "str_replace"]);
-
-export function isEditTool(toolName: string): boolean {
-  return EDIT_TOOLS.has(toolName);
-}
+/** Tools that count as progress (not approach-churn). */
+export { isEditTool } from "../shared/edit-tools";
 
 export type RecoveryKind = "repeat" | "thinking" | "stuck" | "truncation" | "ghost";
 

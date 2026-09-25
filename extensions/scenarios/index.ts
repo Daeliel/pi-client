@@ -37,7 +37,8 @@ import {
 } from "./vision";
 import { presentVisionToSession } from "../shared/vision-relay";
 import { scaffoldScenario } from "./scaffold";
-import { resetGateClaim, tryClaimGate, isGateClaimed } from "../shared/gate-orchestrator";
+import { resetGateClaim, tryClaimGate, isGateClaimed, registerGateReset } from "../shared/gate-orchestrator";
+import { extractEditPath, isCodePath, isEditTool } from "../shared/edit-tools";
 import { classifyScenarioFailure, formatClassifiedFailure } from "../shared/failure-classify";
 import { detectStacks, formatStackDoctorLines, shouldInjectWebProcedure } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
@@ -47,7 +48,6 @@ function isWebFile(filePath: string): boolean {
   return WEB_FILE.test(filePath.replace(/\\/g, "/"));
 }
 
-const EDIT_TOOLS = new Set(["write", "edit", "create", "multiedit", "apply_patch", "str_replace"]);
 const STATE_TYPE = "foundation-scenarios-state";
 
 interface PersistedState {
@@ -75,17 +75,8 @@ const ScenarioSchema = Type.Object({
   }),
 });
 
-function extractPath(input: unknown): string | null {
-  if (!input || typeof input !== "object") return null;
-  const obj = input as Record<string, unknown>;
-  for (const key of ["path", "file_path", "filePath", "filename", "file"]) {
-    const v = obj[key];
-    if (typeof v === "string" && v.length > 0) return v;
-  }
-  return null;
-}
-
 export default function (pi: ExtensionAPI) {
+  registerGateReset(pi);
   const changedFiles = new Set<string>();
   let fixAttempts = 0;
   let qaFixAttempts = 0;
@@ -201,9 +192,9 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_result", async (event, ctx) => {
     const config = cfg(ctx);
-    if (!config.enabled || !EDIT_TOOLS.has(event.toolName)) return;
+    if (!config.enabled || !isEditTool(event.toolName)) return;
 
-    const p = extractPath(event.input);
+    const p = extractEditPath(event.input);
     if (p && !changedFiles.has(p)) {
       changedFiles.add(p);
       if (isWebFile(p)) {
@@ -274,7 +265,15 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end", async (_event, ctx) => {
     const config = cfg(ctx);
     if (!config.enabled || !config.blocking) return;
-    if (config.gateOnCodeChanges && changedFiles.size === 0) return;
+    if (config.gateOnCodeChanges && ![...changedFiles].some(isCodePath)) {
+      // Docs/notes/assets only — nothing behavioural to prove. Forget them so they
+      // do not make a later unrelated turn look like a code change.
+      if (changedFiles.size > 0) {
+        changedFiles.clear();
+        persist();
+      }
+      return;
+    }
     if (isGateClaimed()) return;
 
     await withGateWorkingMessage(ctx, "Acceptance gates (scenarios/QA) — inference idle", async () => {

@@ -55,7 +55,7 @@ export interface ScenariosConfig {
   playwrightConfig: string;
   /** Require define_scenarios before the gate passes. */
   requireDefined: boolean;
-  /** Only gate when code files were edited this task. */
+  /** Only gate when code files were edited this task (docs, notes, images and lockfiles do not count). */
   gateOnCodeChanges: boolean;
   /** Attach Playwright failure screenshots to run_scenarios / gate messages. */
   visionOnFailure: boolean;
