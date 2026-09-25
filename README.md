@@ -126,9 +126,13 @@ Each web project also gets `.pi/playwright.config.ts` (auto-scaffolded) — make
 
 ```bash
 npm install
-npm run typecheck   # tsc --noEmit
-npm test            # node:test suites for detectors, gates, scaffolds
+npm run typecheck        # extensions and tests
+npm test                 # unit tests + integration tests
+npm run test:it          # integration tests only
+npm run measure:prompt -- "build a settings page"   # prompt sections + active tools a model gets
 ```
+
+Integration tests (`test/*.it.ts`) run a real Pi session against Pi's scripted "faux" model in a temp project with its own HOME, so gate loops, anti-loop recovery, tool activation and the vision relay are tested end to end — no GPU or API key needed.
 
 Repo layout: `extensions/*/index.ts` is each extension's entry point; `extensions/shared/` holds the gate orchestrator, stack detection, and failure classification; `skills/`, `prompts/`, `templates/` are content; `bootstrap/` + `scripts/` are install plumbing.
 
