@@ -90,6 +90,18 @@ export function parseFlutterDoctorOutput(output: string): DoctorCheck[] {
   return checks;
 }
 
+/**
+ * Android release builds need exactly two things from flutter doctor: the SDK and the
+ * Android toolchain. Both must be found AND pass. Unrelated doctor sections (Chrome,
+ * Visual Studio, Xcode) and the doctor's exit code do not matter, and an output
+ * where neither check can be found is "unknown", never "ready".
+ */
+export function androidReleaseReady(parsed: DoctorCheck[]): boolean {
+  const sdk = parsed.find((c) => c.id === "flutter_sdk");
+  const android = parsed.find((c) => c.id === "android_toolchain");
+  return Boolean(sdk?.ok && android?.ok);
+}
+
 export function formatDoctorReport(result: DoctorResult, projectHints: DoctorCheck[] = []): string {
   const lines: string[] = [];
   lines.push(result.ready ? "RELEASE DOCTOR: ready to build" : "RELEASE DOCTOR: not ready — fix blockers first");

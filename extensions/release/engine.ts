@@ -3,8 +3,10 @@ import { promisify } from "node:util";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { hasTool } from "../verify/engine";
+import { clipMiddle } from "../shared/output";
 import type { ReleaseConfig, ReleaseTargetConfig } from "./config";
 import {
+  androidReleaseReady,
   formatDoctorReport,
   parseFlutterDoctorOutput,
   type DoctorCheck,
@@ -145,9 +147,7 @@ export async function runReleaseDoctor(cwd: string, config: ReleaseConfig): Prom
   const r = await run(`${flutter} doctor -v`, cwd, 120000);
   const parsed = parseFlutterDoctorOutput(r.out);
   const checks = [...project, ...parsed];
-  const ready = projectOk && parsed.every((c) => c.ok) && r.code === 0;
-
-  return { ready, checks, rawOutput: r.out };
+  return { ready: projectOk && androidReleaseReady(parsed), checks, rawOutput: r.out };
 }
 
 export function formatDoctorMessage(result: DoctorResult, cwd: string): string {
@@ -256,12 +256,23 @@ export function formatBuildReport(result: BuildResult, targetCfg?: ReleaseTarget
     lines.push(`Expected artifact: ${result.artifactPath}`);
   }
   if (result.output) {
-    lines.push("");
-    const trimmed =
-      result.output.length > 6000 ? `${result.output.slice(0, 6000)}\n…(truncated)` : result.output;
-    lines.push(trimmed);
+    const cause = gradleFailureBlock(result.output);
+    if (cause && !result.ok) lines.push("", "What went wrong (from the Gradle log):", cause);
+    lines.push("", clipMiddle(result.output, 6000, 0.25));
   }
   return lines.join("\n");
+}
+
+/**
+ * Gradle's "* What went wrong:" section, which sits at the END of a long build log —
+ * the part a head-only cut threw away.
+ */
+export function gradleFailureBlock(output: string): string | null {
+  const start = output.search(/\* What went wrong:/);
+  if (start < 0) return null;
+  const rest = output.slice(start);
+  const end = rest.search(/\n\* (Try|Get more help|Exception is):/);
+  return clipMiddle(end > 0 ? rest.slice(0, end) : rest, 2000);
 }
 
 export function listTargetKeys(config: ReleaseConfig): string[] {
