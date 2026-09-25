@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { loadConfig, type VerifyConfig } from "./config";
-import { verify, formatReport, toolchainStatus } from "./engine";
+import { allSkippedForMissingTools, verify, formatReport, toolchainStatus } from "./engine";
 import { OPERATING_PROCEDURE } from "./procedure";
 import { resetGateClaim, tryClaimGate, registerGateReset } from "../shared/gate-orchestrator";
 import { extractEditPath, isEditTool } from "../shared/edit-tools";
@@ -94,10 +94,13 @@ export default function (pi: ExtensionAPI) {
     const result = await verify(ctx.cwd, [p], config, ["lint"], ctx.signal);
     if (!result.failed) return;
 
+    // Not isError: the edit DID apply. Flagging the edit as failed makes small models
+    // redo the same edit (old text no longer matches → a real error → confusion).
     const report = formatReport(result);
-    const note = `\n\n[foundation verifier] Lint failed for ${p}. Fix before continuing:\n${report}`;
+    const note =
+      `\n\n[foundation verifier] The edit to ${p} was applied. Lint now reports problems in that file — ` +
+      `fix them next (do not repeat the edit you just made):\n${report}`;
     return {
-      isError: true,
       content: [...event.content, { type: "text", text: note }],
     };
   });
@@ -169,8 +172,7 @@ export default function (pi: ExtensionAPI) {
       const files = params.scope === "project" ? [] : [...changedFiles];
       const result = await verify(ctx.cwd, files, config, undefined, signal);
       const report = formatReport(result);
-      const allSkipped =
-        result.checks.length > 0 && result.checks.every((c) => c.status === "skip") && files.length > 0;
+      const allSkipped = files.length > 0 && allSkippedForMissingTools(result);
       return {
         content: [{ type: "text", text: report }],
         details: { failed: result.failed, ran: result.ran, allSkipped },

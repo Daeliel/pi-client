@@ -1,3 +1,5 @@
+import { clipMiddle } from "./output";
+
 /**
  * Route failure output into a primary LABEL + EVIDENCE + RAW.
  * Labels are hints for the next action — models must still read evidence/raw.
@@ -31,10 +33,9 @@ export const LABEL_TRUST_WARNING =
 const RAW_MAX = 3500;
 const EVIDENCE_MAX = 500;
 
+/** RAW keeps both ends (summaries are at the end); EVIDENCE is a single line, head is enough. */
 function clip(text: string, max: number): string {
-  const t = text.trim();
-  if (t.length <= max) return t;
-  return `${t.slice(0, max)}\n…(truncated)`;
+  return clipMiddle(text, max);
 }
 
 function firstMatchLine(text: string, re: RegExp): string | null {

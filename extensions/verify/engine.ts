@@ -1,5 +1,6 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import { clipMiddle, plainOutputEnv, stripAnsi } from "../shared/output";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { VerifyConfig, LanguageConfig } from "./config";
@@ -44,15 +45,16 @@ async function run(
       windowsHide: true,
       maxBuffer: 16 * 1024 * 1024,
       signal,
+      env: plainOutputEnv(),
     });
-    return { code: 0, out: `${stdout}${stderr}`.trim(), timedOut: false, aborted: false };
+    return { code: 0, out: stripAnsi(`${stdout}${stderr}`).trim(), timedOut: false, aborted: false };
   } catch (e: unknown) {
     const err = e as { stdout?: string; stderr?: string; code?: number; killed?: boolean; signal?: string; name?: string; message?: string };
     // User pressed Esc / the turn was cancelled — not a real failure.
     if (err.name === "AbortError" || signal?.aborted) {
       return { code: 0, out: "", timedOut: false, aborted: true };
     }
-    const out = `${err.stdout ?? ""}${err.stderr ?? ""}`.trim() || err.message || "unknown error";
+    const out = stripAnsi(`${err.stdout ?? ""}${err.stderr ?? ""}`).trim() || err.message || "unknown error";
     const timedOut = Boolean(err.killed) || err.signal === "SIGTERM";
     const code = typeof err.code === "number" ? err.code : 1;
     return { code: timedOut ? 124 : code, out, timedOut, aborted: false };
@@ -163,13 +165,47 @@ export function partitionScopes(piCwd: string, files: string[], isolate: boolean
   });
 }
 
-function packageHasTestScript(cwd: string): boolean {
+function readPackageJson(cwd: string): { scripts?: Record<string, string>; eslintConfig?: unknown } | null {
   try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf8"));
-    return Boolean(pkg?.scripts?.test);
+    return JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf8"));
   } catch {
-    return false;
+    return null;
   }
+}
+
+/** `npm init` writes a test script that always fails; running it proves nothing and cannot be fixed by code. */
+export function isPlaceholderTestScript(script: string | undefined): boolean {
+  if (!script) return false;
+  return /no test specified/i.test(script) || /^\s*echo\b[^&|;]*(&&|;)\s*exit\s+1\s*$/i.test(script);
+}
+
+/** Why `npm test` should not run here, or null when it should. */
+function nodeTestSkipReason(cwd: string): string | null {
+  const script = readPackageJson(cwd)?.scripts?.test;
+  if (!script) return "no test script in package.json";
+  if (isPlaceholderTestScript(script)) return "package.json test script is the npm placeholder — add real tests to enable";
+  return null;
+}
+
+const ESLINT_CONFIGS = [
+  "eslint.config.js",
+  "eslint.config.mjs",
+  "eslint.config.cjs",
+  "eslint.config.ts",
+  "eslint.config.mts",
+  "eslint.config.cts",
+  ".eslintrc",
+  ".eslintrc.js",
+  ".eslintrc.cjs",
+  ".eslintrc.json",
+  ".eslintrc.yaml",
+  ".eslintrc.yml",
+];
+
+/** ESLint exits with a config error (not a lint error) when the project has no config. */
+function hasEslintConfig(cwd: string): boolean {
+  if (ESLINT_CONFIGS.some((f) => fileExists(cwd, f))) return true;
+  return Boolean(readPackageJson(cwd)?.eslintConfig);
 }
 
 const BASE_EXT_TO_LANG: Record<string, string> = {
@@ -220,8 +256,8 @@ interface PreparedCommand {
   command: string;
   /** Probe to confirm the toolchain exists; if it fails we skip (not fail). */
   probe?: string;
-  /** Extra gate: only run if this returns true. */
-  applicable?: () => boolean;
+  /** Extra gate: a skip reason when the check does not apply, null when it should run. */
+  skipReason?: () => string | null;
 }
 
 function rawCommand(cfg: LanguageConfig, kind: CheckKind): string | undefined {
@@ -253,7 +289,7 @@ async function prepare(
       if (pyFiles.length === 0 && !hasPyProject) {
         return {
           command,
-          applicable: () => false,
+          skipReason: () => "no Python tests or pytest config in this project",
         };
       }
       // Scope pytest to this work folder, not parent workspace discovery.
@@ -271,13 +307,19 @@ async function prepare(
 
   if (language === "node") {
     const probe = cfg[`${kind}Probe`] as string | undefined;
-    const applicable =
+    const usesEslint = /\beslint\b/.test(raw);
+    const skipReason =
       kind === "test"
-        ? () => packageHasTestScript(cwd)
+        ? () => nodeTestSkipReason(cwd)
         : kind === "build"
-          ? () => fileExists(cwd, "tsconfig.json")
-          : () => fileExists(cwd, "package.json");
-    return { command: withFiles(raw), probe, applicable };
+          ? () => (fileExists(cwd, "tsconfig.json") ? null : "no tsconfig.json")
+          : () =>
+              !fileExists(cwd, "package.json")
+                ? "no package.json"
+                : usesEslint && !hasEslintConfig(cwd)
+                  ? "no ESLint config in this project"
+                  : null;
+    return { command: withFiles(raw), probe, skipReason };
   }
 
   // Generic / user-defined language from config.
@@ -298,8 +340,9 @@ async function runCheck(
 
   const label = `${language} ${kind}`;
 
-  if (prepared.applicable && !prepared.applicable()) {
-    return { language, kind, label, status: "skip", output: "", reason: "not applicable to this project" };
+  const notApplicable = prepared.skipReason?.();
+  if (notApplicable) {
+    return { language, kind, label, status: "skip", output: "", reason: `not applicable: ${notApplicable}` };
   }
 
   if (prepared.probe && !(await hasTool(prepared.probe, cwd))) {
@@ -461,12 +504,23 @@ export async function toolchainStatus(cwd: string, config: VerifyConfig): Promis
   return out;
 }
 
+/**
+ * Every check skipped and at least one because a tool is missing — nothing was
+ * verified and the user must install something. "Not applicable" skips alone are fine.
+ */
+export function allSkippedForMissingTools(result: VerifyResult): boolean {
+  return (
+    result.checks.length > 0 &&
+    result.checks.every((c) => c.status === "skip") &&
+    result.checks.some((c) => c.reason?.startsWith("toolchain missing"))
+  );
+}
+
 /** Render check results into a compact, model-readable report. */
 export function formatReport(result: VerifyResult): string {
   if (result.checks.length === 0) return "No applicable checks for the changed files.";
   const lines: string[] = [];
-  const skipCount = result.checks.filter((c) => c.status === "skip").length;
-  if (skipCount === result.checks.length) {
+  if (allSkippedForMissingTools(result)) {
     lines.push("WARNING: All checks were SKIPPED — this is NOT a pass. Install missing tools (/doctor) and run verify again.");
     lines.push("");
   }
@@ -475,8 +529,7 @@ export function formatReport(result: VerifyResult): string {
     const suffix = c.reason ? ` (${c.reason})` : "";
     lines.push(`[${icon}] ${c.label}${suffix}`);
     if (c.status === "fail" && c.output) {
-      const trimmed = c.output.length > 4000 ? `${c.output.slice(0, 4000)}\n…(truncated)` : c.output;
-      lines.push(trimmed);
+      lines.push(clipMiddle(c.output, 4000));
     }
   }
   return lines.join("\n");

@@ -1,5 +1,6 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import { clipMiddle, plainOutputEnv, stripAnsi } from "../shared/output";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ScenariosConfig, RunnerConfig } from "./config";
@@ -35,8 +36,9 @@ async function run(command: string, cwd: string, timeoutMs: number, signal?: Abo
       windowsHide: true,
       maxBuffer: 16 * 1024 * 1024,
       signal,
+      env: plainOutputEnv(),
     });
-    return { code: 0, out: `${stdout}${stderr}`.trim(), timedOut: false, aborted: false };
+    return { code: 0, out: stripAnsi(`${stdout}${stderr}`).trim(), timedOut: false, aborted: false };
   } catch (e: unknown) {
     const err = e as {
       stdout?: string;
@@ -50,7 +52,7 @@ async function run(command: string, cwd: string, timeoutMs: number, signal?: Abo
     if (err.name === "AbortError" || signal?.aborted) {
       return { code: 0, out: "", timedOut: false, aborted: true };
     }
-    const out = `${err.stdout ?? ""}${err.stderr ?? ""}`.trim() || err.message || "unknown error";
+    const out = stripAnsi(`${err.stdout ?? ""}${err.stderr ?? ""}`).trim() || err.message || "unknown error";
     const timedOut = Boolean(err.killed) || err.signal === "SIGTERM";
     const code = typeof err.code === "number" ? err.code : 1;
     return { code: timedOut ? 124 : code, out, timedOut, aborted: false };
@@ -394,8 +396,7 @@ export function formatReport(result: ScenariosRunResult, scenarios: ScenarioDefi
     const suffix = c.reason ? ` (${c.reason})` : "";
     lines.push(`[${icon}] ${c.scenarioId}: ${c.title} — ${c.testFile}${suffix}`);
     if (c.status === "fail" && c.output) {
-      const trimmed = c.output.length > 4000 ? `${c.output.slice(0, 4000)}\n…(truncated)` : c.output;
-      lines.push(trimmed);
+      lines.push(clipMiddle(c.output, 4000));
     }
     if (c.status === "fail" && c.screenshots?.length) {
       lines.push(`  screenshots: ${c.screenshots.length} captured (attached when visionOnFailure is on)`);

@@ -187,9 +187,13 @@ export default function (pi: ExtensionAPI) {
     try {
       const issues = await browser.checkAfterEdit(config, ctx.signal);
       if (issues.length === 0) return;
-      const report = formatReportForConfig(issues, `[browser console] Issues after editing ${p}:`, config);
+      // Not isError: the edit applied; the page just has console errors now.
+      const report = formatReportForConfig(
+        issues,
+        `[browser console] The edit to ${p} was applied. The page now logs these errors — fix them next:`,
+        config,
+      );
       return {
-        isError: true,
         content: [...event.content, { type: "text", text: `\n\n${report}` }],
       };
     } catch (e) {
