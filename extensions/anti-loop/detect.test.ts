@@ -162,4 +162,26 @@ describe("findGhostToolCall", () => {
       null,
     );
   });
+
+  it("detects <function_call> and [TOOL_CALLS] wrappers", () => {
+    for (const text of [
+      `<function_call>{"name": "bash", "arguments": {"command": "ls"}}</function_call>`,
+      `[TOOL_CALLS] [{"name": "edit", "arguments": {"path": "a.ts"}}]`,
+    ]) {
+      const ghost = findGhostToolCall({ role: "assistant", stopReason: "stop", content: [{ type: "text", text }] });
+      assert.ok(ghost, text);
+    }
+  });
+
+  it("detects a bare JSON call only when it names a real tool", () => {
+    const msg = {
+      role: "assistant",
+      stopReason: "stop",
+      content: [{ type: "text", text: 'I will call {"name": "read", "arguments": {"path": "a.ts"}} now.' }],
+    };
+    assert.equal(findGhostToolCall(msg)?.toolName, undefined);
+    assert.equal(findGhostToolCall(msg, ["read", "bash"])?.toolName, "read");
+    assert.equal(findGhostToolCall(msg, ["bash"]), null, "unknown names are ordinary JSON");
+  });
 });
+

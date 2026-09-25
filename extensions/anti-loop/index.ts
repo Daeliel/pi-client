@@ -30,8 +30,14 @@ import {
 
 export default function (pi: ExtensionAPI) {
   let configCache: AntiLoopConfig | null = null;
-  let lastFingerprint: string | null = null;
-  let identicalStreak = 0;
+  /**
+   * How often each exact tool call ran since the last successful edit. Counting
+   * (not just consecutive streaks) catches A,B,A,B,A re-read cycles; an edit is
+   * progress, so it clears the window.
+   */
+  const callsSinceEdit = new Map<string, number>();
+  /** Highest repeat count of any call since the last edit (for stuck-phrase checks). */
+  let maxRepeatSinceEdit = 0;
   let recoveries = 0;
   let hardStopped = false;
   let steeredThisTurn = false;
@@ -50,6 +56,10 @@ export default function (pi: ExtensionAPI) {
   let userHelpSawEdit = false;
   let userHelpAnnounced = false;
 
+  function toolNames(): string[] {
+    return pi.getAllTools().map((t) => t.name);
+  }
+
   function cfg(ctx: ExtensionContext): AntiLoopConfig {
     if (!configCache) configCache = loadConfig(ctx.cwd);
     return configCache;
@@ -57,8 +67,8 @@ export default function (pi: ExtensionAPI) {
 
   /** Reset per-turn counters. Does not clear hardStopped or user-help. */
   function resetTurnCounters() {
-    lastFingerprint = null;
-    identicalStreak = 0;
+    callsSinceEdit.clear();
+    maxRepeatSinceEdit = 0;
     recoveries = 0;
     steeredThisTurn = false;
     thinkingLoopFired = false;
@@ -305,14 +315,11 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    if (fp === lastFingerprint) {
-      identicalStreak += 1;
-    } else {
-      lastFingerprint = fp;
-      identicalStreak = 1;
-    }
+    const seen = (callsSinceEdit.get(fp) ?? 0) + 1;
+    callsSinceEdit.set(fp, seen);
+    maxRepeatSinceEdit = Math.max(maxRepeatSinceEdit, seen);
 
-    if (identicalStreak < config.maxIdenticalToolCalls) return;
+    if (seen < config.maxIdenticalToolCalls) return;
 
     // Block the repeat; count as a recovery and steer once.
     if (!steeredThisTurn || recoveries < config.maxRecoveries) {
@@ -331,9 +338,23 @@ export default function (pi: ExtensionAPI) {
     return {
       block: true,
       reason:
-        `ANTI-LOOP: blocked repeated \`${event.toolName}\` (${identicalStreak}× identical). ` +
+        `ANTI-LOOP: blocked repeated \`${event.toolName}\` (${seen}× identical with no edit in between). ` +
         `Do something different — see the follow-up message.`,
     };
+  });
+
+  // A successful edit is progress: the model is no longer thrashing, so the repeat
+  // window and the recovery budget start over. The edit's own fingerprint keeps its
+  // count, so writing the same content again and again is still caught.
+  pi.on("tool_result", async (event, ctx) => {
+    if (!cfg(ctx).enabled || hardStopped) return;
+    if (!isEditTool(event.toolName) || event.isError) return;
+    const fp = toolFingerprint(event.toolName, "input" in event ? event.input : undefined);
+    const own = callsSinceEdit.get(fp) ?? 0;
+    callsSinceEdit.clear();
+    if (own > 0) callsSinceEdit.set(fp, own);
+    maxRepeatSinceEdit = own;
+    recoveries = 0;
   });
 
   // Catch reasoning thrash mid-stream before it burns the full output budget.
@@ -361,7 +382,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (config.recoverGhostToolCalls) {
-      const ghost = findGhostToolCall(event.message);
+      const ghost = findGhostToolCall(event.message, toolNames());
       if (ghost) {
         tryRecover(ctx, config, ghostToolSteer(ghost.toolName), "ghost");
         return;
@@ -383,7 +404,7 @@ export default function (pi: ExtensionAPI) {
     if (!blob) return;
 
     const repeats = stuckPhraseRepeatCount(blob);
-    if (repeats >= 2 || (hasStuckPhrase(blob) && identicalStreak >= 2)) {
+    if (repeats >= 2 || (hasStuckPhrase(blob) && maxRepeatSinceEdit >= 2)) {
       tryRecover(ctx, config, STUCK_STEER, "stuck");
     }
   });
@@ -400,7 +421,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (config.recoverGhostToolCalls) {
-        const ghost = findGhostToolCall(messages[i]);
+        const ghost = findGhostToolCall(messages[i], toolNames());
         if (ghost) {
           tryRecover(ctx, config, ghostToolSteer(ghost.toolName), "ghost");
           return;
