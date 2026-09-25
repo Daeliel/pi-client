@@ -45,6 +45,11 @@ export interface Harness {
   userMessages(): string[];
   /** Number of model calls made. */
   calls(): number;
+  /**
+   * Wait until the session has been idle for a moment. Commands send their prompt
+   * without awaiting it, so waitForIdle() alone can return before that run starts.
+   */
+  settle(): Promise<void>;
   dispose(): void;
 }
 
@@ -114,6 +119,17 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
     session,
     faux,
     calls: () => faux.state.callCount,
+    async settle() {
+      let quiet = 0;
+      for (let i = 0; i < 2000 && quiet < 5; i++) {
+        await new Promise((r) => setTimeout(r, 5));
+        if (session.isIdle) quiet += 1;
+        else {
+          quiet = 0;
+          await session.waitForIdle();
+        }
+      }
+    },
     userMessages: () =>
       session.messages
         .filter((m) => m.role === "user")
