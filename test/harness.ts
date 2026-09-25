@@ -142,7 +142,14 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
       session.dispose();
       process.env.HOME = prevHome;
       process.env.USERPROFILE = prevUserProfile;
-      fs.rmSync(root, { recursive: true, force: true });
+      // Best effort: on Windows a directory cannot be removed while a child process
+      // (e.g. a toolchain probe started at session_start) still runs inside it.
+      // Temp-dir cleanup must never fail a test.
+      try {
+        fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+      } catch {
+        /* left for the OS temp cleaner */
+      }
     },
   };
 }
