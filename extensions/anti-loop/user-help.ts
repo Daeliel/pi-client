@@ -48,3 +48,10 @@ Ask the user 1–3 concrete questions about things you cannot observe (where the
 export const USER_HELP_PROMPT = `USER-HELP: I am here to help. Stop investigating.
 
 Ask me 1–3 short questions about things you cannot observe (where it happened, what I clicked, console errors, expected vs actual). Then wait. Do not start a new theory.`;
+
+/** Appended to what the user typed when they jump in on a thrashing run. */
+export function withUserHelpNote(text: string): string {
+  return `${text.trim()}
+
+(ANTI-LOOP user-help: you were going in circles. Use what I just said for ONE concrete action, or ask me 1–3 short questions about what you cannot observe — where it happened, what I clicked, console output. No new investigation.)`;
+}

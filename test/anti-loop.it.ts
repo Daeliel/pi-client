@@ -63,3 +63,59 @@ describe("anti-loop", () => {
     }
   });
 });
+
+describe("anti-loop user-help trigger", () => {
+  it("lets ordinary mid-run steering through without aborting", async () => {
+    const h = await createHarness({ extensions: [antiLoopExt], files: { "a.js": "a" } });
+    try {
+      let nextSystem = "";
+      h.faux.setResponses([
+        () => {
+          void h.session.prompt("also make the button blue", { streamingBehavior: "steer" });
+          return call("read", { path: "a.js" });
+        },
+        reply("done, and the button is blue"),
+        (context) => {
+          nextSystem = context.systemPrompt ?? "";
+          return reply("next");
+        },
+      ]);
+      await h.session.prompt("tweak the page");
+      await h.settle();
+      const aborted = h.session.messages.filter((m) => m.role === "assistant" && m.stopReason === "aborted");
+      assert.equal(aborted.length, 0, "the in-flight response must not be aborted");
+      assert.ok(h.userMessages().includes("also make the button blue"), "steer delivered");
+      await h.session.prompt("next task");
+      assert.doesNotMatch(nextSystem, /Anti-loop: user-help/, "no user-help for plain steering");
+    } finally {
+      h.dispose();
+    }
+  });
+
+  it("diverts mid-run typing to user-help when the run is thrashing", async () => {
+    const h = await createHarness({ extensions: [antiLoopExt], files: { "a.js": "a" } });
+    try {
+      let jumpIn = "";
+      h.faux.setResponses([
+        call("read", { path: "a.js" }),
+        call("read", { path: "a.js" }),
+        call("read", { path: "a.js" }), // blocked → recovery 1: the run is thrashing
+        () => {
+          void h.session.prompt("it breaks on the settings tab", { streamingBehavior: "steer" });
+          return call("read", { path: "b.js" });
+        },
+        (context) => {
+          jumpIn = JSON.stringify(context.messages.at(-1)?.content ?? "");
+          return reply("Which button did you click?");
+        },
+        reply("unused"),
+      ]);
+      await h.session.prompt("fix the bug");
+      await h.settle();
+      assert.match(jumpIn, /it breaks on the settings tab/);
+      assert.match(jumpIn, /ANTI-LOOP user-help/, "the reply to the jump-in message is in user-help mode");
+    } finally {
+      h.dispose();
+    }
+  });
+});

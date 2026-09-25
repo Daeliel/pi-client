@@ -25,6 +25,7 @@ import {
   USER_HELP_PROCEDURE,
   USER_HELP_PROMPT,
   USER_HELP_STEER,
+  withUserHelpNote,
   type RecoveryKind,
 } from "./user-help";
 
@@ -91,6 +92,11 @@ export default function (pi: ExtensionAPI) {
 
   function armUserHelp() {
     pendingUserHelp = true;
+  }
+
+  /** Thrash signals from this run: a recovery already fired, or many different calls with no edit. */
+  function runLooksStuck(): boolean {
+    return recoveries > 0 || churnNotifiedThisTurn;
   }
 
   function userHelpEnabled(ctx: ExtensionContext): boolean {
@@ -219,10 +225,15 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // User jumped in while the agent was still working.
-    if (!ctx.isIdle()) {
+    // User typed while the agent was working. Ordinary steering ("also make it blue")
+    // goes through untouched. Only when this run is visibly thrashing does it become
+    // user-help: stop the stream and put the instruction on the user's own message —
+    // that message is answered in a continuation run, where before_agent_start (and so
+    // the system-prompt procedure) never fires.
+    if (!ctx.isIdle() && runLooksStuck()) {
       armUserHelp();
       ctx.abort();
+      return { action: "transform" as const, text: withUserHelpNote(event.text) };
     }
   });
 
