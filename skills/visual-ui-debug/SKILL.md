@@ -17,7 +17,7 @@ When the user names a **specific screen, tab, menu, or level** ("History is empt
 3. **Console on that view** — `attachConsoleCapture(page)` at test start, `assertClean()` after steps (scaffolded in `.pi/scenarios/helpers/`).
 4. A home-page counter, storage log, or code review is **not** proof the reported screen works.
 
-Template: `templates/scenarios/example-symptom-repro.spec.ts` in pi-client.
+Starter spec: `scaffold_scenario` with template `symptom-repro` writes one into this project's `.pi/scenarios/`.
 
 ## Stop spinning
 
@@ -49,11 +49,20 @@ Template: `templates/scenarios/example-symptom-repro.spec.ts` in pi-client.
 |-----------|-------------------------------------|
 | Wrong/empty screen or tab | Reproduce their clicks/keys → open that screen → screenshot + assert content visible there |
 | Same size before/after | Compare bounding boxes: `locator.boundingBox()` for two states, or element width/height within tolerance |
-| Covers header text | `expect(locator).not.toOverlap(other)` or screenshot + vision; check z-index/position |
+| Covers header text | Compare `boundingBox()` of both elements and assert the rectangles do not intersect (snippet below); check z-index/position |
 | Wrong position | `boundingBox()` x/y within tolerance vs baseline screenshot or stored idle box |
 | Canvas / no DOM nodes | Screenshots after each step in output/ + vision review; reuse click coords from passing specs; **scrollCanvasWheel/Drag** before proof when UI is below the fold |
 
 Store baseline metrics in the spec (constants) or compare before/after in one test.
+
+Overlap check (Playwright has no overlap matcher — do not invent one):
+
+```ts
+const a = (await page.getByRole("banner").boundingBox())!;
+const b = (await page.getByTestId("toast").boundingBox())!;
+const overlaps = a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+expect(overlaps).toBe(false);
+```
 
 ## App must be running
 
@@ -77,10 +86,10 @@ Store baseline metrics in the spec (constants) or compare before/after in one te
 - Checking a different screen or indirect metric when the user named a specific view.
 - Declaring done when run_scenarios passed but output screenshot shows the wrong tab/screen — fix spec coords/asserts.
 - Saying "cannot scroll" without `scrollCanvasWheel` / `scrollCanvasDrag` in the spec — capture tools are single-frame.
-- Injecting app state in a web spec to skip UI (localStorage, page.evaluate, globals) when proving a user flow.
+- Injecting app state in a web spec to skip UI (localStorage, a `page.evaluate` that sets values/clicks/dispatches, globals) when proving a user flow. Reading values with `page.evaluate` (e.g. `getComputedStyle`) is fine.
 - Changing npm `test` script to `exit 0` to green-verify.
 
 ## Template
 
-See `templates/scenarios/example-visual-before-after.spec.ts` in pi-client for a
-copy-paste pattern (before/after screenshots + optional bounding-box compare).
+`scaffold_scenario` with template `visual-before-after` writes a before/after screenshot
+spec (with an optional bounding-box compare) into this project — adapt it.

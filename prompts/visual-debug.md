@@ -9,6 +9,6 @@ Stop speculating from code alone. Read and follow the **visual-ui-debug** skill.
 3. One hypothesis → one code change → `run_scenarios`. Max one passive code read before step 1.
 
 Do not use `browser_*` to prove layout. Fix `webServer` / `baseURL` in `.pi/playwright.config.ts` if connection refused.
-Pattern templates in pi-client: `example-symptom-repro.spec.ts` (wrong screen / empty tab) or `example-visual-before-after.spec.ts` (layout/size). Copy into `.pi/scenarios/` and adapt.
+Starter specs: `scaffold_scenario` with template `symptom-repro` (wrong screen / empty tab) or `visual-before-after` (layout/size) writes one into `.pi/scenarios/` — then adapt it.
 
 Issue:
