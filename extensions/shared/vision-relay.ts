@@ -4,6 +4,7 @@ import * as path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, foundationConfigPaths } from "./config-paths";
 import { completeVision, type AnyModel } from "./model-complete";
+import { clipMiddle } from "./output";
 import type { VisionImageContent } from "../scenarios/vision";
 
 export interface VisionRelayConfig {
@@ -27,9 +28,30 @@ export interface VisionModelResolution {
 
 export type SessionVisionPart = { type: "text"; text: string } | VisionImageContent;
 
-const CAPTION_SYSTEM = `You describe screenshots for a text-only coding agent that cannot see images.
-Be concrete: which screen/page/state, visible text and controls, errors, layout problems (overlap, clipped, blank/white, misaligned).
-Do not write code or suggest file edits. 400 words max.`;
+const CAPTION_SYSTEM = `You are the eyes of a text-only coding agent that cannot see images.
+You are told what the agent is checking. Answer THAT question from the pixels — do not guess from the context text.
+Be concrete: name the screen/page/state, quote visible text and controls, and report errors and layout problems (overlap, clipped, blank/white, misaligned).
+Do not write code or suggest file edits. Use the reply format you are given. 350 words max.`;
+
+/** How much of the harness message the captioner sees (it only needs the question, not full logs). */
+const CAPTION_CONTEXT_CHARS = 1800;
+
+/**
+ * User turn for the captioner: what the agent is checking, then a fixed reply format
+ * whose first lines answer the question — a small text model reads those and acts.
+ */
+export function buildCaptionRequest(context: string, imageCount: number): string {
+  const which = imageCount === 1 ? "this screenshot" : `these ${imageCount} screenshots (label them Image 1, Image 2, … in order)`;
+  const ctx = context.trim()
+    ? `What the agent is checking (from its harness):\n"""\n${clipMiddle(context, CAPTION_CONTEXT_CHARS, 0.6)}\n"""\n\n`
+    : "";
+  return `${ctx}Describe ${which} for the agent. Reply in exactly this form:
+SCREEN: <which screen/page/state is shown>
+MATCHES: <yes | no | unclear> — <does it show what the agent is checking for, and why>
+BLANK: <yes | no>
+PROBLEMS: <visible errors or layout problems, or "none">
+DETAILS: <visible text, controls and layout that matter for the check>`;
+}
 
 function readJson(file: string): Partial<VisionRelayConfig> | null {
   try {
@@ -107,13 +129,24 @@ export function resolveVisionModel(
   return { model };
 }
 
-/** Configured relay, or first vision model that is not the session model. */
+/**
+ * Order auto-pick candidates: the session model's own provider first (for a local setup
+ * that is the local server), then everything else. Without this, any cloud key that
+ * happens to be in the environment could win and screenshots would leave the machine.
+ */
+export function rankRelayCandidates(available: string[], sessionProvider: string | undefined, sessionKey: string): string[] {
+  const others = available.filter((m) => m !== sessionKey);
+  const sameProvider = sessionProvider ? others.filter((m) => m.startsWith(`${sessionProvider}/`)) : [];
+  const rest = others.filter((m) => !sameProvider.includes(m));
+  return [...sameProvider, ...rest];
+}
+
+/** Configured relay, or the best-ranked vision model that is not the session model. */
 export function pickRelayModel(ctx: ExtensionContext, configuredSpec: string): VisionModelResolution {
   const trimmed = configuredSpec.trim();
   if (trimmed) return resolveVisionModel(ctx, trimmed, { kind: "relay model" });
   const sessionKey = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
-  const available = listVisionModels(ctx);
-  const pick = available.find((m) => m !== sessionKey) ?? available[0];
+  const pick = rankRelayCandidates(listVisionModels(ctx), ctx.model?.provider, sessionKey)[0];
   if (!pick) return { model: null, reason: "no vision-capable model with auth in models.json" };
   return resolveVisionModel(ctx, pick, { kind: "relay model" });
 }
@@ -162,6 +195,7 @@ export async function presentVisionToSession(
   intro: string,
   images: VisionImageContent[],
   paths: string[],
+  opts: { source?: "harness" | "user" } = {},
 ): Promise<SessionVisionPart[]> {
   if (images.length === 0) {
     return [{ type: "text", text: intro }];
@@ -169,9 +203,18 @@ export async function presentVisionToSession(
 
   const config = loadVisionRelayConfig(ctx.cwd);
   const { buildVisionContent, buildVisionMessage } = await import("../scenarios/vision");
+  const fromUser = opts.source === "user";
   if (!config.enabled || sessionSeesImages(ctx)) {
     return buildVisionContent(intro, images, paths);
   }
+
+  // A user's pasted image is not a QA screenshot: no QA checklist, and when the model
+  // cannot see it, it must ask rather than guess.
+  const unseen = (why: string) =>
+    fromUser
+      ? `${intro}\n\n[The user attached ${images.length} image(s). You cannot see images and ${why}. ` +
+        `Ask the user to describe what the image shows before acting on it.]`
+      : `${buildVisionMessage(intro, paths)}\n\n${why}`;
 
   const picked = pickRelayModel(ctx, config.relayModel);
   if (!picked.model) {
@@ -179,7 +222,7 @@ export async function presentVisionToSession(
       `Vision relay: session model is text-only and ${picked.reason}. ` +
       `Screenshots stay on disk; the model cannot see them. /vision model <provider/id>`;
     if (ctx.hasUI) ctx.ui.notify(note, "warning");
-    return [{ type: "text", text: `${buildVisionMessage(intro, paths)}\n\n${note}` }];
+    return [{ type: "text", text: unseen(fromUser ? `no vision model is configured (${picked.reason})` : note) }];
   }
 
   const relayName = `${picked.model.provider}/${picked.model.id}`;
@@ -188,10 +231,7 @@ export async function presentVisionToSession(
     ctx.ui.setWorkingMessage("Vision relay: describing screenshot…");
   }
 
-  const userText =
-    images.length === 1
-      ? "Describe this screenshot for a text-only coding agent."
-      : `Describe these ${images.length} screenshots for a text-only coding agent. Label them in order.`;
+  const userText = buildCaptionRequest(intro, images.length);
 
   try {
     const reply = await completeVision(ctx, picked.model, CAPTION_SYSTEM, userText, images, {
@@ -202,7 +242,7 @@ export async function presentVisionToSession(
       const err = reply.error ?? "empty description";
       const note = `Vision relay (${relayName}) failed (${err}). Screenshots are on disk only.`;
       if (ctx.hasUI) ctx.ui.notify(note, "warning");
-      return [{ type: "text", text: `${buildVisionMessage(intro, paths)}\n\n${note}` }];
+      return [{ type: "text", text: unseen(fromUser ? `the vision relay failed (${err})` : note) }];
     }
     return [{ type: "text", text: formatRelayedMessage(intro, paths, reply.text, relayName) }];
   } finally {

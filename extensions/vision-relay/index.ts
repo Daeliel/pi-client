@@ -18,7 +18,7 @@ export default function (pi: ExtensionAPI) {
     if (sessionSeesImages(ctx)) return;
 
     const intro = event.text.trim() || "User attached image(s).";
-    const parts = await presentVisionToSession(ctx, intro, images, []);
+    const parts = await presentVisionToSession(ctx, intro, images, [], { source: "user" });
     const text = parts
       .filter((p): p is { type: "text"; text: string } => p.type === "text")
       .map((p) => p.text)

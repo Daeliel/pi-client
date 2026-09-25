@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { formatRelayedMessage, inputImagesToRelay, pickRelayModel, sessionSeesImages } from "./vision-relay";
+import { buildCaptionRequest, formatRelayedMessage, rankRelayCandidates, inputImagesToRelay, pickRelayModel, sessionSeesImages } from "./vision-relay";
 
 describe("formatRelayedMessage", () => {
   it("keeps the intro and adds a labeled description instead of image parts", () => {
@@ -99,3 +99,31 @@ describe("inputImagesToRelay", () => {
     assert.deepEqual(inputImagesToRelay([]), []);
   });
 });
+
+describe("buildCaptionRequest", () => {
+  it("tells the captioner what the agent is checking and asks for a fixed format", () => {
+    const text = buildCaptionRequest("Scenario history-tab: open History, the list shows 3 entries", 1);
+    assert.match(text, /History, the list shows 3 entries/);
+    assert.match(text, /^MATCHES:/m);
+    assert.match(text, /^BLANK:/m);
+  });
+
+  it("clips long harness context but keeps its end", () => {
+    const text = buildCaptionRequest(`${"log line\n".repeat(2000)}EXPECTED: settings screen`, 2);
+    assert.ok(text.length < 3000);
+    assert.match(text, /EXPECTED: settings screen/);
+    assert.match(text, /Image 1, Image 2/);
+  });
+});
+
+describe("rankRelayCandidates", () => {
+  it("prefers the session provider and never picks the session model", () => {
+    const ranked = rankRelayCandidates(
+      ["cloud/vision-xl", "local-gpu/qwen-vl", "local-gpu/qwen-text"],
+      "local-gpu",
+      "local-gpu/qwen-text",
+    );
+    assert.deepEqual(ranked, ["local-gpu/qwen-vl", "cloud/vision-xl"]);
+  });
+});
+

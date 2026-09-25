@@ -30,8 +30,10 @@ export interface HarnessOptions {
   extensions: ExtensionFactory[];
   /** Files to create in the temp project (relative path → content). */
   files?: Record<string, string>;
-  /** Model input modalities. */
+  /** Session model input modalities. */
   input?: ("text" | "image")[];
+  /** Extra models on the same faux provider (share its response queue), e.g. a vision relay. */
+  extraModels?: { id: string; input: ("text" | "image")[] }[];
 }
 
 export interface Harness {
@@ -64,7 +66,10 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
 
   const faux = fauxProvider({
     provider: "faux",
-    models: [{ id: "small", input: opts.input ?? ["text"], reasoning: true, contextWindow: 131072, maxTokens: 8192 }],
+    models: [
+      { id: "small", input: opts.input ?? ["text"], reasoning: true, contextWindow: 131072, maxTokens: 8192 },
+      ...(opts.extraModels ?? []).map((m) => ({ ...m, contextWindow: 131072, maxTokens: 8192 })),
+    ],
     tokensPerSecond: 1_000_000,
   });
   const agentDir = path.join(home, ".pi", "agent");
@@ -92,7 +97,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   const { session } = await createAgentSession({
     cwd,
     agentDir,
-    model: faux.getModel(),
+    model: faux.getModel("small"),
     modelRuntime,
     resourceLoader: loader,
     sessionManager: SessionManager.inMemory(cwd),
