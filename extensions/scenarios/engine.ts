@@ -342,6 +342,7 @@ export async function runScenarios(
 
   const ran = checks.some((c) => c.status === "pass" || c.status === "fail");
 
+  const canvasProject = hasWeb && detectStacks(cwd).stacks.includes("flutter");
   const weakSpecWarnings =
     config.failOnWeakSpec !== false
       ? checks.flatMap((c) => {
@@ -350,7 +351,7 @@ export async function runScenarios(
           if (!fs.existsSync(abs)) return [];
           try {
             const text = fs.readFileSync(abs, "utf8");
-            return scanSpecFileContent(c.testFile.replace(/\\/g, "/"), text);
+            return scanSpecFileContent(c.testFile.replace(/\\/g, "/"), text, { canvasProject });
           } catch {
             return [];
           }
