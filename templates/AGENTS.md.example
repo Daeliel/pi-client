@@ -1,9 +1,9 @@
 # Project instructions for Pi
 
-Pi auto-creates this file on first session if missing (pi-client). Edit and commit.
-You can also copy from `pi-client/templates/AGENTS.md.example` manually.
-
-Remove sections you do not need. Keep bullets short and actionable.
+Reference only: pi-client does not copy this file. On first session it writes a short
+AGENTS.md from what it detects. Borrow the sections below that apply, replace every
+"(e.g. …)" with the real answer, and delete the rest — the agent reads AGENTS.md on
+every turn and treats everything in it as fact.
 
 ## Stack
 

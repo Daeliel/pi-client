@@ -42,6 +42,17 @@ import { extractEditPath, isCodePath, isEditTool } from "../shared/edit-tools";
 import { classifyScenarioFailure, formatClassifiedFailure } from "../shared/failure-classify";
 import { detectStacks, formatStackDoctorLines, shouldInjectWebProcedure } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
+import { syncOwnedTools } from "../shared/tool-activation";
+
+const TOOLS = [
+  "scaffold_scenario",
+  "define_scenarios",
+  "run_scenarios",
+  "capture_page_screenshot",
+  "confirm_visual_qa",
+  "scenarios_housekeep",
+  "list_scenarios",
+];
 const WEB_FILE = /\.(html?|js|mjs|cjs|jsx|ts|tsx|css|vue|svelte)$/i;
 
 function isWebFile(filePath: string): boolean {
@@ -132,6 +143,28 @@ export default function (pi: ExtensionAPI) {
     return n.includes("/.pi/scenarios/") && (n.endsWith(".spec.ts") || n.endsWith(".test.py"));
   }
 
+  /**
+   * Model-facing tools for this project and config. Housekeeping and listing stay
+   * on /scenarios for the user; the screenshot tool only exists for web UIs, and
+   * confirm_visual_qa only when the model is the one approving QA shots.
+   */
+  function syncTools(ctx: ExtensionContext) {
+    const config = cfg(ctx);
+    if (!config.enabled) {
+      syncOwnedTools(pi, TOOLS, []);
+      return;
+    }
+    const wanted = ["scaffold_scenario", "define_scenarios", "run_scenarios"];
+    if (shouldInjectWebProcedure(ctx.cwd, changedFiles)) wanted.push("capture_page_screenshot");
+    if (qaMode(config) === "model") wanted.push("confirm_visual_qa");
+    syncOwnedTools(pi, TOOLS, wanted);
+  }
+
+  pi.on("input", async (_event, ctx) => {
+    configCache = null;
+    syncTools(ctx);
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom" && entry.customType === STATE_TYPE) {
@@ -147,6 +180,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
+    syncTools(ctx);
     const config = cfg(ctx);
     if (!config.enabled || !ctx.hasUI) return;
 
@@ -805,6 +839,7 @@ export default function (pi: ExtensionAPI) {
           configCache = null;
           visualQaConfirmed = false;
           persist();
+          syncTools(ctx);
           ctx.ui.notify(`Visual QA shot enabled (saved to ${file}). Mode: ${cfg(ctx).qaShot.mode}`, "info");
           return;
         }
@@ -812,6 +847,7 @@ export default function (pi: ExtensionAPI) {
           const file = persistQaShotMode(ctx.cwd, "off", scope);
           configCache = null;
           persist();
+          syncTools(ctx);
           ctx.ui.notify(`Visual QA shot disabled / mode off (saved to ${file}).`, "info");
           return;
         }
@@ -820,6 +856,7 @@ export default function (pi: ExtensionAPI) {
           configCache = null;
           visualQaConfirmed = false;
           persist();
+          syncTools(ctx);
           ctx.ui.notify(`Visual QA mode: ${action} (saved to ${file}).`, "info");
           return;
         }

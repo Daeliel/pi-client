@@ -50,9 +50,11 @@ import { extractEditPath, isEditTool } from "../shared/edit-tools";
 import { registerOnceModifier } from "../shared/once";
 import { detectStacks, isWebPath } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
+import { syncOwnedTools } from "../shared/tool-activation";
 
 const STATE_TYPE = "foundation-polish-state";
 const WIDGET_KEY = "polish";
+const TOOLS = ["polish_report", "polish_surfaces"];
 
 interface PersistedState {
   sessionLevel?: PolishSetting | null;
@@ -262,15 +264,30 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  /**
+   * Polish tools only while polish can run. `newPrompt` is the text of a fresh user
+   * prompt (its level is not resolved yet — infer it the same way before_agent_start
+   * will); follow-ups keep the current task's level.
+   */
+  function syncTools(ctx: ExtensionContext, newPrompt?: string) {
+    const config = cfg(ctx);
+    let level: PolishSetting = newPrompt === undefined && task ? task.level : (promptLevel ?? sessionLevel ?? config.level);
+    if (level === "auto" && newPrompt !== undefined) level = inferLevel(newPrompt, detectStacks(ctx.cwd).hasWebUi).level;
+    syncOwnedTools(pi, TOOLS, config.enabled && level !== "off" ? TOOLS : []);
+  }
+
   // Real user input starts a new task. (/once arrives as extension input with the flags already armed.)
-  pi.on("input", async (event) => {
-    if (event.source === "extension") return { action: "continue" as const };
-    newUserPrompt = true;
-    const parsed = parseLevelPrefix(event.text);
-    if (parsed) {
-      promptLevel = parsed.level;
-      return { action: "transform" as const, text: parsed.text };
+  pi.on("input", async (event, ctx) => {
+    if (event.source === "extension") {
+      syncTools(ctx, newUserPrompt ? event.text : undefined);
+      return { action: "continue" as const };
     }
+    newUserPrompt = true;
+    configCache = null;
+    const parsed = parseLevelPrefix(event.text);
+    if (parsed) promptLevel = parsed.level;
+    syncTools(ctx, parsed ? parsed.text : event.text);
+    if (parsed) return { action: "transform" as const, text: parsed.text };
     return { action: "continue" as const };
   });
 
@@ -776,6 +793,7 @@ export default function (pi: ExtensionAPI) {
           task.source = "session";
         }
         setStatus(ctx);
+        syncTools(ctx);
         return;
       }
 

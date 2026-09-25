@@ -17,6 +17,9 @@ import {
   SETUP_HELP,
 } from "./engine";
 import { RESEARCH_PROCEDURE } from "./procedure";
+import { syncOwnedTools } from "../shared/tool-activation";
+
+const TOOLS = ["web_search", "fetch_web_page"];
 
 export default function (pi: ExtensionAPI) {
   let configCache: ResearchConfig | null = null;
@@ -31,9 +34,22 @@ export default function (pi: ExtensionAPI) {
     return configCache;
   }
 
-  pi.on("session_start", async (event, ctx) => {
-    if (event.reason !== "startup" && event.reason !== "reload") return;
+  // web_search needs a key; fetch_web_page works without one.
+  function syncTools(ctx: ExtensionContext) {
+    const config = cfg(ctx);
+    const wanted = !config.enabled ? [] : resolveApiKey(config) ? TOOLS : ["fetch_web_page"];
+    syncOwnedTools(pi, TOOLS, wanted);
+  }
+
+  pi.on("input", async (_event, ctx) => {
     reloadConfig(ctx);
+    syncTools(ctx);
+  });
+
+  pi.on("session_start", async (event, ctx) => {
+    reloadConfig(ctx);
+    syncTools(ctx);
+    if (event.reason !== "startup" && event.reason !== "reload") return;
     const config = cfg(ctx);
     if (!config.enabled) return;
     if (resolveApiKey(config)) return;
@@ -42,7 +58,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event, ctx) => {
     const config = cfg(ctx);
-    if (!config.enabled) return;
+    // Without a key web_search is not offered; the lane guide would only point at a missing tool.
+    if (!config.enabled || !resolveApiKey(config)) return;
     return {
       systemPrompt: `${event.systemPrompt}\n\n${RESEARCH_PROCEDURE}`,
     };
@@ -131,7 +148,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Fetch public URL text (Lane C)",
     promptGuidelines: [
       "Use for official documentation URLs — not http://localhost or file:// paths.",
-      "Prefer web_search first when you do not know the URL.",
+      "Use fetch_web_page with a URL you already have: from an error message, AGENTS.md, docs you know, or a search result.",
     ],
     parameters: Type.Object({
       url: Type.String({ description: "Public https URL to fetch." }),
@@ -209,6 +226,7 @@ export default function (pi: ExtensionAPI) {
         if (action === "clear") {
           const cleared = clearUserApiKey();
           reloadConfig(ctx);
+          syncTools(ctx);
           ctx.ui.notify(
             cleared ? "Removed saved API key from ~/.pi/research.config.json" : "No saved key in config file",
             "info",
@@ -222,6 +240,7 @@ export default function (pi: ExtensionAPI) {
         }
         const savedTo = saveUserApiKey(rawKey);
         reloadConfig(ctx);
+        syncTools(ctx);
         ctx.ui.notify(`Saved Brave API key to ${savedTo} (${maskApiKey(rawKey)}). Restart not required.`, "info");
         return;
       }

@@ -118,7 +118,7 @@ Frequently used toggles:
 
 ## Per-project notes (AGENTS.md)
 
-pi-client's procedures are global; anything specific to one app (dev-server command, port, folder conventions, "do not touch" areas) belongs in that repo's `AGENTS.md` (or `CLAUDE.md`). pi-client auto-creates it from [`templates/AGENTS.md.example`](templates/AGENTS.md.example) on first session. Keep it short — it's loaded into context every turn.
+pi-client's procedures are global; anything specific to one app (dev-server command, port, folder conventions, "do not touch" areas) belongs in that repo's `AGENTS.md` (or `CLAUDE.md`). On first session pi-client creates it from what it can detect (stack, package scripts, dev-server hint) — only true facts, no example text, because small models treat everything in it as fact. Add your rules under **Rules**; [`templates/AGENTS.md.example`](templates/AGENTS.md.example) lists sections worth considering. Keep it short — it's loaded into context every turn.
 
 Each web project also gets `.pi/playwright.config.ts` (auto-scaffolded) — make sure its `webServer.command` and `baseURL` match how the app actually starts, it's the #1 cause of failing captures.
 

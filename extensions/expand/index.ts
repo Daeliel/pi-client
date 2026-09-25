@@ -31,6 +31,9 @@ import {
 } from "./procedure";
 import { runCriticCompletion } from "../polish/critic";
 import { isGateClaimed, resetGateClaim, tryClaimGate, registerGateReset } from "../shared/gate-orchestrator";
+import { syncOwnedTools } from "../shared/tool-activation";
+
+const TOOLS = ["expand_map", "expand_propose", "expand_fit"];
 import { extractEditPath, isEditTool } from "../shared/edit-tools";
 import { registerOnceModifier } from "../shared/once";
 import { withGateWorkingMessage } from "../shared/working-status";
@@ -191,8 +194,12 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("input", async (event) => {
+  pi.on("input", async (event, ctx) => {
     if (event.source !== "extension") resetOnNextStart = true;
+    // Expand tools exist only while an expand task is armed or running; a plain user
+    // prompt ends the task (before_agent_start resets it), so they go away with it.
+    const active = taskArmed || (!resetOnNextStart && task.mode !== "idle");
+    syncOwnedTools(pi, TOOLS, cfg(ctx).enabled && active ? TOOLS : []);
     return { action: "continue" as const };
   });
 

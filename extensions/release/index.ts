@@ -10,6 +10,9 @@ import {
   runReleaseDoctor,
 } from "./engine";
 import { RELEASE_PROCEDURE } from "./procedure";
+import { syncOwnedTools } from "../shared/tool-activation";
+
+const TOOLS = ["release_doctor", "release_build"];
 
 export default function (pi: ExtensionAPI) {
   let configCache: ReleaseConfig | null = null;
@@ -23,6 +26,15 @@ export default function (pi: ExtensionAPI) {
     configCache = loadConfig(ctx.cwd);
     return configCache;
   }
+
+  // Release tools only exist for the model in a Flutter project with an android/ folder.
+  function syncTools(ctx: ExtensionContext) {
+    const config = reloadConfig(ctx);
+    syncOwnedTools(pi, TOOLS, config.enabled && isFlutterAndroidProject(ctx.cwd) ? TOOLS : []);
+  }
+
+  pi.on("session_start", async (_event, ctx) => syncTools(ctx));
+  pi.on("input", async (_event, ctx) => syncTools(ctx));
 
   pi.on("before_agent_start", async (event, ctx) => {
     reloadConfig(ctx);

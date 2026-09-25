@@ -17,6 +17,26 @@ import { resetGateClaim, tryClaimGate, isGateClaimed, registerGateReset } from "
 import { extractEditPath, isEditTool } from "../shared/edit-tools";
 import { detectStacks, shouldInjectWebProcedure } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
+import { syncOwnedTools } from "../shared/tool-activation";
+
+const TOOLS = [
+  "browser_connect",
+  "browser_list_pages",
+  "browser_status",
+  "browser_console",
+  "browser_errors",
+  "browser_screenshot",
+  "browser_navigate",
+  "browser_reload",
+  "browser_network_errors",
+  "browser_disconnect",
+];
+/**
+ * What the model gets in a web project. Connection management and raw console dumps
+ * stay on /browser for the user: the tools auto-connect, and browser_errors already
+ * reports what matters.
+ */
+const MODEL_TOOLS = ["browser_errors", "browser_network_errors", "browser_reload", "browser_navigate", "browser_screenshot"];
 
 const STATE_TYPE = "foundation-browser-console-state";
 
@@ -131,6 +151,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
+    syncTools(ctx);
     const config = cfg(ctx);
     if (!config.enabled) return;
 
@@ -142,6 +163,17 @@ export default function (pi: ExtensionAPI) {
         "info",
       );
     }
+  });
+
+  function syncTools(ctx: ExtensionContext) {
+    const config = cfg(ctx);
+    const web = config.enabled && shouldInjectWebProcedure(ctx.cwd, changedWebFiles);
+    syncOwnedTools(pi, TOOLS, web ? MODEL_TOOLS : []);
+  }
+
+  pi.on("input", async (_event, ctx) => {
+    configCache = null;
+    syncTools(ctx);
   });
 
   pi.on("session_shutdown", async () => {

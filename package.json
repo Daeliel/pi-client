@@ -56,6 +56,7 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
     "test": "tsx --tsconfig test/tsconfig.json --test extensions/**/*.test.ts test/*.it.ts",
     "test:unit": "tsx --tsconfig test/tsconfig.json --test extensions/**/*.test.ts",
-    "test:it": "tsx --tsconfig test/tsconfig.json --test test/*.it.ts"
+    "test:it": "tsx --tsconfig test/tsconfig.json --test test/*.it.ts",
+    "measure:prompt": "tsx --tsconfig test/tsconfig.json test/measure-prompt.ts"
   }
 }
