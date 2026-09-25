@@ -80,6 +80,9 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
     refreshOnCreate: false,
   });
   modelRuntime.registerNativeProvider(faux.provider);
+  // registerNativeProvider refreshes availability in the background; wait for it so
+  // getAvailable() (used by vision-relay auto-pick) already lists the faux models.
+  await modelRuntime.refresh({ allowNetwork: false });
 
   const loader = new DefaultResourceLoader({
     cwd,
