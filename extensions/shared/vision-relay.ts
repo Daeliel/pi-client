@@ -6,6 +6,7 @@ import { CONFIG_DIR_NAME, foundationConfigPaths } from "./config-paths";
 import { completeVision, type AnyModel } from "./model-complete";
 import { clipMiddle } from "./output";
 import type { VisionImageContent } from "../scenarios/vision";
+import { readJsonConfig } from "./json-config";
 
 export interface VisionRelayConfig {
   /** Master switch. When false, images are attached as today even if the session is text-only. */
@@ -54,12 +55,7 @@ DETAILS: <visible text, controls and layout that matter for the check>`;
 }
 
 function readJson(file: string): Partial<VisionRelayConfig> | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return null;
-  }
+  return readJsonConfig<VisionRelayConfig>(file);
 }
 
 export function loadVisionRelayConfig(cwd: string): VisionRelayConfig {

@@ -1,6 +1,6 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { foundationConfigPaths } from "../shared/config-paths";
+import { readJsonConfig } from "../shared/json-config";
 
 export interface LanguageConfig {
   enabled?: boolean;
@@ -90,12 +90,7 @@ function deepMergeLanguages(
 }
 
 function readJson(file: string): Partial<VerifyConfig> | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return null;
-  }
+  return readJsonConfig<VerifyConfig>(file);
 }
 
 /**

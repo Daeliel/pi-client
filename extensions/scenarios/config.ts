@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, foundationConfigPaths } from "../shared/config-paths";
+import { readJsonConfig } from "../shared/json-config";
 
 export interface RunnerConfig {
   enabled?: boolean;
@@ -126,12 +127,7 @@ export const DEFAULT_CONFIG: ScenariosConfig = {
 };
 
 function readJson(file: string): Partial<ScenariosConfig> | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return null;
-  }
+  return readJsonConfig<ScenariosConfig>(file);
 }
 
 function mergeRunner(base: RunnerConfig, override: Partial<RunnerConfig> | undefined): RunnerConfig {
