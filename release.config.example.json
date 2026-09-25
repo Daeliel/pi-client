@@ -1,0 +1,22 @@
+{
+  "_comment": "Copy to .pi/release.config.json in a Flutter app (or ~/.pi/release.config.json globally). Legacy <project>/release.config.json still works. Optional: set flutterCommand to the full path of flutter/flutter.bat when it is not on PATH (FLUTTER_ROOT env is also checked).",
+  "enabled": true,
+  "blocking": false,
+  "timeoutMs": 900000,
+  "targets": {
+    "apk": {
+      "command": "flutter build apk --release",
+      "artifactPath": "build/app/outputs/flutter-apk/app-release.apk",
+      "label": "Release APK"
+    },
+    "appbundle": {
+      "command": "flutter build appbundle --release",
+      "artifactPath": "build/app/outputs/bundle/release/app-release.aab",
+      "label": "Play Store AAB"
+    }
+  },
+  "signing": {
+    "keystorePath": ".pi/signing/release.jks",
+    "propertiesFile": "android/key.properties"
+  }
+}

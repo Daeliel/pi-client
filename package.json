@@ -1,0 +1,59 @@
+{
+  "name": "pi-client",
+  "version": "0.1.0",
+  "description": "Guardrail foundation for the Pi coding agent running small local models: blocking verifier, acceptance scenarios, anti-loop protection, browser console gate, visual QA, web research, and release tooling.",
+  "keywords": [
+    "pi-package",
+    "pi-coding-agent",
+    "local-llm",
+    "coding-agent",
+    "guardrails"
+  ],
+  "author": "Jurica Dujmovic",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Daeliel/pi-client.git"
+  },
+  "homepage": "https://github.com/Daeliel/pi-client#readme",
+  "bugs": {
+    "url": "https://github.com/Daeliel/pi-client/issues"
+  },
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./extensions/anti-loop",
+      "./extensions/verify",
+      "./extensions/scenarios",
+      "./extensions/browser-console",
+      "./extensions/project-context",
+      "./extensions/research",
+      "./extensions/release",
+      "./extensions/polish",
+      "./extensions/expand",
+      "./extensions/once",
+      "./extensions/vision-relay"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "prompts": [
+      "./prompts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@types/node": "^22.15.0",
+    "tsx": "^4.19.0",
+    "typebox": "*",
+    "typescript": "^7.0.2"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test extensions/**/*.test.ts"
+  }
+}

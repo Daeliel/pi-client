@@ -1,0 +1,13 @@
+{
+  "_comment": "Copy to ~/.pi/anti-loop.config.json (all projects) or .pi/anti-loop.config.json (one repo). /anti-loop on|off persists enabled. /stuck enters user-help. churnNotifyAfterUniqueTools is notify-only (0 disables).",
+  "enabled": true,
+  "maxIdenticalToolCalls": 3,
+  "maxRecoveries": 2,
+  "recoverOnTruncation": true,
+  "detectStuckPhrases": true,
+  "detectThinkingLoops": true,
+  "thinkingLoopMinRepeats": 3,
+  "recoverGhostToolCalls": true,
+  "userHelp": true,
+  "churnNotifyAfterUniqueTools": 6
+}

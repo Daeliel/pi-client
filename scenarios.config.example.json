@@ -1,0 +1,49 @@
+{
+  "_comment": "Copy to .pi/scenarios.config.json in a project (or ~/.pi/scenarios.config.json globally). Legacy <project>/scenarios.config.json still works. Playwright: run install-on-client.bat once on the client PC, then edit .pi/playwright.config.ts per app.",
+  "enabled": true,
+  "blocking": true,
+  "maxFixAttempts": 5,
+  "timeoutMs": 180000,
+  "scenariosDir": ".pi/scenarios",
+  "playwrightConfig": ".pi/playwright.config.ts",
+  "requireDefined": true,
+  "gateOnCodeChanges": true,
+  "visionOnFailure": true,
+  "visionOnPass": true,
+  "autoDiscoverScenarios": true,
+  "failOnWeakSpec": true,
+  "housekeeping": {
+    "enabled": true,
+    "maxSpecsBeforeAudit": 10,
+    "auditOnAgentEnd": true,
+    "skipScratchInAutoRun": true
+  },
+  "maxScreenshotsPerRun": 4,
+  "maxImageWidth": 1280,
+  "maxImageBytes": 900000,
+  "jpegQuality": 80,
+  "qaShot": {
+    "_comment": "/scenarios qa on|off|model|human|approve — mode: model (default, agent confirm_visual_qa), human (user /scenarios qa approve), off",
+    "enabled": false,
+    "mode": "model",
+    "blocking": true,
+    "gateOnWebChanges": true,
+    "outputPath": ".pi/qa-shot.jpg",
+    "urlPath": "/"
+  },
+  "web": {
+    "enabled": true,
+    "command": "{pw} test {files} --config {config}",
+    "probe": "{pw} --version"
+  },
+  "api": {
+    "enabled": true,
+    "command": "{py} -m pytest {files} -q",
+    "probe": "{py} -m pytest --version"
+  },
+  "script": {
+    "enabled": true,
+    "command": "{py} {files}",
+    "probe": "{py} --version"
+  }
+}

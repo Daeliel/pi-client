@@ -1,0 +1,4 @@
+{
+    "defaultProvider": "local-gpu",
+    "defaultModel": "local-gpu/qwen3.6-27b-q6-dflash"
+}

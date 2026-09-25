@@ -1,0 +1,18 @@
+{
+  "_comment": "Copy to .pi/polish.config.json in a project (or ~/.pi/polish.config.json globally). /polish <level> [user|project] writes `level`; /polish critic <provider/model> writes `criticModel`. Per prompt: start with +showcase (or polish:showcase).",
+  "enabled": true,
+  "level": "auto",
+  "passes": {
+    "_comment": "Max 'name the three weakest things' passes per surface per user prompt. off is always 0.",
+    "off": 0,
+    "basic": 0,
+    "standard": 1,
+    "showcase": 3,
+    "ultimate": 6
+  },
+  "maxNamings": 3,
+  "criticModel": "",
+  "announceAuto": true,
+  "shotDir": ".pi/polish",
+  "inventoryPath": ".pi/polish/inventory.json"
+}

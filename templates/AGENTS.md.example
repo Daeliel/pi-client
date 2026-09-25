@@ -1,0 +1,48 @@
+# Project instructions for Pi
+
+Pi auto-creates this file on first session if missing (pi-client). Edit and commit.
+You can also copy from `pi-client/templates/AGENTS.md.example` manually.
+
+Remove sections you do not need. Keep bullets short and actionable.
+
+## Stack
+
+- Language / framework: (e.g. Flutter web, React + Vite, Python FastAPI)
+- Package manager and common commands: (e.g. `npm run dev`, `flutter run -d web-server --web-port=5173`)
+
+## Dev server & Pi tooling
+
+- Local URL and port: (e.g. `http://localhost:5173`)
+- `.pi/playwright.config.ts` **webServer.command** and **baseURL** must match how you actually start this app
+- Acceptance tests live in `.pi/scenarios/` — extend existing specs before writing new shell scripts
+
+## Conventions
+
+- File layout: (where screens, widgets, API routes live)
+- Naming / patterns the agent should follow
+- Things **not** to change without asking (e.g. shared packages, generated files)
+
+## Verify & scenarios
+
+- How to lint/typecheck: (or rely on Pi `verify` — list project-specific overrides in `.pi/verify.config.json` if any)
+- User flows that must stay green: (short list; details in `.pi/scenarios/`)
+- Bug fixes: Playwright spec must reproduce the user's steps and assert on the screen they named — no proxy checks elsewhere
+
+## Mobile release (Flutter Android)
+
+- Flutter SDK path: (e.g. `C:\flutter\bin\flutter.bat` if not on PATH — set in `.pi/release.config.json`)
+- Android SDK: (e.g. `%LOCALAPPDATA%\Android\Sdk` after Android Studio setup)
+- Before APK/AAB: `/release doctor` or `release_doctor` — must be ready
+- Build: `/release build apk` or `release_build` — artifact path in `.pi/release.config.json`
+- Keystore: local only under `.pi/signing/` — never commit secrets
+
+## Known gotchas
+
+- Platform quirks (Windows paths, PowerShell — no `&&` chains)
+- Canvas / Flutter web: clicks in Playwright specs, not CDP browser tools
+- For layout bugs: `/visual-debug` or the visual-ui-debug skill — run scenarios before code-reading loops
+- For official API docs not in repo: `web_search` (needs `/research key` once per PC)
+
+## Out of scope
+
+- What this repo is **not** (monorepo boundaries, deploy-only folders, etc.)

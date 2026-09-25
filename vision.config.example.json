@@ -1,0 +1,6 @@
+{
+  "_comment": "Copy to ~/.pi/vision.config.json (all projects) or .pi/vision.config.json (one repo). When the session model is text-only, screenshots go to relayModel and the session gets a description. Empty relayModel = first vision-capable model with auth. /vision model <provider/id> persists relayModel.",
+  "enabled": true,
+  "relayModel": "",
+  "maxTokens": 900
+}

@@ -1,0 +1,23 @@
+{
+  "_comment": "Copy to .pi/browser-console.config.json in a project (or ~/.pi/browser-console.config.json globally). Legacy <project>/browser-console.config.json still works.",
+  "enabled": true,
+  "cdpHost": "127.0.0.1",
+  "cdpPort": 9222,
+  "autoConnect": true,
+  "autoLaunchBrowser": true,
+  "playwrightFallback": true,
+  "launchUrl": "http://localhost:5173",
+  "launchWaitMs": 12000,
+  "urlMatch": ["localhost", "127.0.0.1"],
+  "checkOnEdit": true,
+  "autoReloadOnEdit": true,
+  "reloadWaitMs": 2000,
+  "blocking": true,
+  "maxFixAttempts": 5,
+  "bufferSize": 200,
+  "dedupeConsole": true,
+  "maxReportGroups": 20,
+  "maxReportChars": 12000,
+  "maxStackLinesInReport": 4,
+  "includeWarnings": false
+}

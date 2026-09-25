@@ -1,0 +1,9 @@
+{
+  "_comment": "Copy to .pi/expand.config.json in a project (or ~/.pi/expand.config.json globally). Pillars, the systems map and the idea ledger live in ledgerPath, not here. /expand critic <provider/model> writes criticModel.",
+  "enabled": true,
+  "ideasPerPass": 6,
+  "fitPasses": 1,
+  "autoMax": 3,
+  "criticModel": "",
+  "ledgerPath": ".pi/expand/ledger.json"
+}

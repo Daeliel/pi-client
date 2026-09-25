@@ -1,0 +1,51 @@
+{
+  "_comment": "Copy to .pi/verify.config.json in a project (or ~/.pi/verify.config.json globally). Legacy <project>/verify.config.json still works. {py} = Python interpreter; {files} = changed files for lint. Tests run whole suite.",
+  "blocking": true,
+  "maxFixAttempts": 5,
+  "timeoutMs": 120000,
+  "verifyOnEdit": true,
+  "languages": {
+    "python": {
+      "enabled": true,
+      "lint": "{py} -m ruff check --select=E,F,B {files}",
+      "test": "{py} -m pytest -q"
+    },
+    "node": {
+      "enabled": true,
+      "lint": "npx --no-install eslint {files}",
+      "lintProbe": "npx --no-install eslint --version",
+      "build": "npx --no-install tsc --noEmit",
+      "buildProbe": "npx --no-install tsc --version",
+      "test": "npm test --silent",
+      "testProbe": "npm --version"
+    },
+    "csharp": {
+      "enabled": true,
+      "extensions": [".cs"],
+      "build": "dotnet build --nologo -v q",
+      "buildProbe": "dotnet --version",
+      "test": "dotnet test --nologo -v q",
+      "testProbe": "dotnet --version"
+    },
+    "go": {
+      "enabled": false,
+      "extensions": [".go"],
+      "lint": "go vet ./...",
+      "lintProbe": "go version",
+      "build": "go build ./...",
+      "buildProbe": "go version",
+      "test": "go test ./...",
+      "testProbe": "go version"
+    },
+    "rust": {
+      "enabled": false,
+      "extensions": [".rs"],
+      "lint": "cargo clippy --quiet",
+      "lintProbe": "cargo --version",
+      "build": "cargo check --quiet",
+      "buildProbe": "cargo --version",
+      "test": "cargo test --quiet",
+      "testProbe": "cargo --version"
+    }
+  }
+}
