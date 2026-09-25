@@ -18,6 +18,7 @@ import { extractEditPath, isEditTool } from "../shared/edit-tools";
 import { detectStacks, shouldInjectWebProcedure } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
 import { syncOwnedTools } from "../shared/tool-activation";
+import { attemptNotes, giveUpNote, RepeatTracker } from "../shared/gate-messages";
 
 const TOOLS = [
   "browser_connect",
@@ -63,6 +64,7 @@ export default function (pi: ExtensionAPI) {
   const browser = new CdpBrowser();
   const changedWebFiles = new Set<string>();
   let fixAttempts = 0;
+  const repeats = new RepeatTracker();
   let configCache: BrowserConsoleConfig | null = null;
 
   function cfg(ctx: ExtensionContext): BrowserConsoleConfig {
@@ -184,6 +186,7 @@ export default function (pi: ExtensionAPI) {
     resetGateClaim();
     configCache = null;
     fixAttempts = 0;
+    repeats.reset();
     const config = cfg(ctx);
     if (!config.blocking) {
       changedWebFiles.clear();
@@ -261,6 +264,7 @@ export default function (pi: ExtensionAPI) {
       if (issues.length === 0) {
         changedWebFiles.clear();
         fixAttempts = 0;
+        repeats.reset();
         persist();
         return;
       }
@@ -270,6 +274,15 @@ export default function (pi: ExtensionAPI) {
           `Browser console still has errors after ${config.maxFixAttempts} attempts — stopping the fix loop. Run /browser errors`,
           "error",
         );
+        pi.sendMessage(
+          {
+            customType: "foundation-gate",
+            content: giveUpNote("browser console", fixAttempts, issues[0]?.message ?? ""),
+            display: true,
+          },
+          { deliverAs: "nextTurn" },
+        );
+        repeats.reset();
         changedWebFiles.clear();
         fixAttempts = 0;
         persist();
@@ -280,9 +293,12 @@ export default function (pi: ExtensionAPI) {
 
       fixAttempts += 1;
       persist();
+      const signature = issues.map((i) => `${i.type} ${i.message}`).join("\n");
+      const notes = attemptNotes(fixAttempts, config.maxFixAttempts, repeats.repeated(signature));
       const report = formatReportForConfig(
         issues,
-        `Browser console errors remain (attempt ${fixAttempts}/${config.maxFixAttempts}). Fix before finishing:`,
+        `Browser console errors remain (attempt ${fixAttempts}/${config.maxFixAttempts}). Fix before finishing:` +
+          (notes ? `\n${notes}` : ""),
         config,
       );
       pi.sendUserMessage(report, { deliverAs: "followUp" });

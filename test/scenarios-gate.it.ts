@@ -96,7 +96,9 @@ describe("scenarios gate", () => {
         reply("unused"),
       ]);
       await h.session.prompt("make a.app");
-      assert.equal(startsWith(h.userMessages(), "Acceptance scenarios failed"), 2);
+      const failures = h.userMessages().filter((m) => m.startsWith("Acceptance scenarios failed"));
+      assert.equal(failures.length, 2);
+      assert.match(failures[1]!, /SAME FAILURE/);
       assert.equal(h.faux.getPendingResponseCount(), 1);
     } finally {
       h.dispose();

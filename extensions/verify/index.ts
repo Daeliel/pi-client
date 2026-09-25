@@ -8,6 +8,7 @@ import { extractEditPath, isEditTool } from "../shared/edit-tools";
 import { classifyVerifyFailure, formatClassifiedFailure } from "../shared/failure-classify";
 import { detectStacks, formatStackDoctorLines } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
+import { attemptNotes, giveUpNote, RepeatTracker } from "../shared/gate-messages";
 
 /** Custom session-entry type used to persist verify state across /resume + reload. */
 const STATE_TYPE = "foundation-verify-state";
@@ -23,6 +24,7 @@ export default function (pi: ExtensionAPI) {
   // Per-session state.
   const changedFiles = new Set<string>();
   let fixAttempts = 0;
+  const repeats = new RepeatTracker();
   let configCache: VerifyConfig | null = null;
 
   function cfg(ctx: ExtensionContext): VerifyConfig {
@@ -66,6 +68,7 @@ export default function (pi: ExtensionAPI) {
     resetGateClaim();
     configCache = null;
     fixAttempts = 0;
+    repeats.reset();
     // With the gate active, the gate clears changedFiles when checks pass, so we
     // keep them across prompts (an interrupted task stays tracked). Without a
     // gate nothing would ever clear them, so reset per prompt.
@@ -118,18 +121,28 @@ export default function (pi: ExtensionAPI) {
         // Checks pass → these files are confirmed; stop tracking them.
         changedFiles.clear();
         fixAttempts = 0;
+        repeats.reset();
         persist();
         return;
       }
+
+      const report = formatReport(result);
+      const classified = classifyVerifyFailure(report);
 
       if (fixAttempts >= config.maxFixAttempts) {
         ctx.ui.notify(
           `Verification still failing after ${config.maxFixAttempts} attempts — stopping the fix loop. Run /verify to see details.`,
           "error",
         );
+        // The model's last reply may claim success; make sure its next turn knows otherwise.
+        pi.sendMessage(
+          { customType: "foundation-gate", content: giveUpNote("verify", fixAttempts, classified.evidence), display: true },
+          { deliverAs: "nextTurn" },
+        );
         // Give up cleanly so the failure doesn't re-fire on every later turn.
         changedFiles.clear();
         fixAttempts = 0;
+        repeats.reset();
         persist();
         return;
       }
@@ -138,12 +151,12 @@ export default function (pi: ExtensionAPI) {
 
       fixAttempts += 1;
       persist();
-      const report = formatReport(result);
-      const classified = classifyVerifyFailure(report);
+      const notes = attemptNotes(fixAttempts, config.maxFixAttempts, repeats.repeated(report));
       const message = formatClassifiedFailure(
         classified,
         `Verification failed (attempt ${fixAttempts}/${config.maxFixAttempts}). ` +
-          `You must fix these before finishing — do not stop while checks fail.`,
+          `You must fix these before finishing — do not stop while checks fail.` +
+          (notes ? `\n${notes}` : ""),
       );
       // Re-trigger a fix turn. sendUserMessage always triggers a turn; deliverAs
       // "followUp" delivers it once the agent has settled (the agent_end moment).

@@ -38,8 +38,18 @@ describe("gate follow-ups re-arm on every run", () => {
         reply("never reached"),
       ]);
       await h.session.prompt("make a.app");
-      assert.equal(verifyFollowUps(h.userMessages()).length, 2);
+      const followUps = verifyFollowUps(h.userMessages());
+      assert.equal(followUps.length, 2);
+      assert.doesNotMatch(followUps[0]!, /SAME FAILURE/);
+      assert.match(followUps[1]!, /SAME FAILURE/, "unchanged failure is called out");
+      assert.match(followUps[1]!, /LAST ATTEMPT \(2\/2\)/);
       assert.equal(h.faux.getPendingResponseCount(), 1);
+
+      // After giving up, the next turn is told the task is not done.
+      let context = "";
+      h.faux.setResponses([(c) => ((context = JSON.stringify(c.messages)), reply("It is still failing."))]);
+      await h.session.prompt("is it done?");
+      assert.match(context, /\[verify\] Still failing after 2 fix attempts/);
     } finally {
       h.dispose();
     }

@@ -43,6 +43,7 @@ import { classifyScenarioFailure, formatClassifiedFailure } from "../shared/fail
 import { detectStacks, formatStackDoctorLines, shouldInjectWebProcedure } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
 import { syncOwnedTools } from "../shared/tool-activation";
+import { attemptNotes, giveUpNote, RepeatTracker } from "../shared/gate-messages";
 
 const TOOLS = [
   "scaffold_scenario",
@@ -91,6 +92,7 @@ export default function (pi: ExtensionAPI) {
   const changedFiles = new Set<string>();
   let fixAttempts = 0;
   let qaFixAttempts = 0;
+  const repeats = new RepeatTracker();
   let visualQaConfirmed = false;
   let scenarios: ScenarioDefinition[] = [];
   let lastRunById: Record<string, "pass" | "fail" | "skip"> = {};
@@ -117,6 +119,15 @@ export default function (pi: ExtensionAPI) {
 
   function hasWebChanges(): boolean {
     return [...changedFiles].some(isWebFile);
+  }
+
+  /** The model's last reply may claim success; its next turn must know the gate gave up. */
+  function leaveGiveUpNote(attempts: number, evidence: string) {
+    pi.sendMessage(
+      { customType: "foundation-gate", content: giveUpNote("scenarios", attempts, evidence), display: true },
+      { deliverAs: "nextTurn" },
+    );
+    repeats.reset();
   }
 
   function persist() {
@@ -199,6 +210,7 @@ export default function (pi: ExtensionAPI) {
     configCache = null;
     fixAttempts = 0;
     qaFixAttempts = 0;
+    repeats.reset();
     const config = cfg(ctx);
     if (!config.enabled) return;
 
@@ -319,6 +331,7 @@ export default function (pi: ExtensionAPI) {
             `No acceptance scenarios defined after ${config.maxFixAttempts} attempts — stopping the fix loop.`,
             "error",
           );
+          leaveGiveUpNote(fixAttempts, "no acceptance scenarios were defined or written for the code change");
           changedFiles.clear();
           fixAttempts = 0;
           persist();
@@ -327,10 +340,12 @@ export default function (pi: ExtensionAPI) {
         if (!tryClaimGate("scenarios")) return;
         fixAttempts += 1;
         persist();
+        const last = attemptNotes(fixAttempts, config.maxFixAttempts, false);
         pi.sendUserMessage(
           `You changed code but no acceptance scenarios are defined (attempt ${fixAttempts}/${config.maxFixAttempts}). ` +
             `Call define_scenarios (or optional scaffold_scenario) with each user-visible flow, write the test files under ${config.scenariosDir}, ` +
-            `then call run_scenarios before finishing.`,
+            `then call run_scenarios before finishing.` +
+            (last ? `\n${last}` : ""),
           { deliverAs: "followUp" },
         );
         return;
@@ -341,11 +356,19 @@ export default function (pi: ExtensionAPI) {
         if (ctx.signal?.aborted) return;
 
         if (result.failed) {
+          const report = formatReport(result, toRun);
+          const classified = classifyScenarioFailure({
+            report,
+            preflightWarnings: result.preflightWarnings,
+            weakSpecBlocking: Boolean(result.weakSpecWarnings?.some((w) => w.blocking)),
+            missingFiles: result.missingFiles,
+          });
           if (fixAttempts >= config.maxFixAttempts) {
             ctx.ui.notify(
               `Scenarios still failing after ${config.maxFixAttempts} attempts — stopping the fix loop. Run /scenarios run`,
               "error",
             );
+            leaveGiveUpNote(fixAttempts, classified.evidence);
             changedFiles.clear();
             scenarios = [];
             fixAttempts = 0;
@@ -358,17 +381,12 @@ export default function (pi: ExtensionAPI) {
           if (!tryClaimGate("scenarios")) return;
           fixAttempts += 1;
           persist();
-          const report = formatReport(result, toRun);
-          const classified = classifyScenarioFailure({
-            report,
-            preflightWarnings: result.preflightWarnings,
-            weakSpecBlocking: Boolean(result.weakSpecWarnings?.some((w) => w.blocking)),
-            missingFiles: result.missingFiles,
-          });
+          const notes = attemptNotes(fixAttempts, config.maxFixAttempts, repeats.repeated(report));
           const intro = formatClassifiedFailure(
             classified,
             `Acceptance scenarios failed (attempt ${fixAttempts}/${config.maxFixAttempts}). ` +
-              `Fix the app or tests — do not finish while scenarios fail.`,
+              `Fix the app or tests — do not finish while scenarios fail.` +
+              (notes ? `\n${notes}` : ""),
             { screens: config.visionOnFailure ? result.screenshots : undefined },
           );
           const shots = config.visionOnFailure ? (result.screenshots ?? []) : [];
