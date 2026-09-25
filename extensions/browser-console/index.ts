@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadConfig, type BrowserConsoleConfig } from "./config";
-import { CdpBrowser, isWebFile, formatReportForConfig, formatNetworkReport, formatStatus, isFailureEntry, sleep } from "./cdp";
+import { CdpBrowser, isWebFile, formatReportForConfig, formatNetworkReport, formatStatus, isFailureEntry } from "./cdp";
 import { ensureDebugBrowserRunning, isCdpConnectionError } from "./launch";
 import { BROWSER_CORE } from "./procedure";
 import type { ConsoleEntry } from "./types";
@@ -216,8 +216,15 @@ export default function (pi: ExtensionAPI) {
         if (!browser.connected) return;
       }
 
-      const issues = failureEntries(browser, config);
+      // Judge the code as it is now: fresh reload with an empty buffer. Errors logged
+      // earlier in the turn may already be fixed.
+      try {
+        await browser.reloadFresh(config.reloadWaitMs, ctx.signal);
+      } catch {
+        return; // tab gone / reload failed — cannot judge, do not block on stale data
+      }
       if (ctx.signal?.aborted) return;
+      const issues = failureEntries(browser, config);
 
       if (issues.length === 0) {
         changedWebFiles.clear();
@@ -332,8 +339,7 @@ export default function (pi: ExtensionAPI) {
       const config = cfg(ctx);
       if (!browser.connected) await requireConnection(ctx, config);
       if (params.reload) {
-        await browser.reload(true);
-        await browser.checkAfterEdit({ ...config, autoReloadOnEdit: false }, signal);
+        await browser.reloadFresh(config.reloadWaitMs, signal);
       }
       const level = params.level ?? "error";
       let entries = browser.getAllBuffered();
@@ -365,8 +371,7 @@ export default function (pi: ExtensionAPI) {
       const config = cfg(ctx);
       if (!browser.connected) await requireConnection(ctx, config);
       if (params.reload) {
-        await browser.reload(true);
-        await browser.checkAfterEdit({ ...config, autoReloadOnEdit: false }, signal);
+        await browser.reloadFresh(config.reloadWaitMs, signal);
       }
       const entries = browser.getBuffered(config.includeWarnings);
       const report = formatReportForConfig(entries, "Browser errors:", config);
@@ -515,9 +520,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, signal, _onUpdate, ctx) {
       const config = cfg(ctx);
       if (!browser.connected) await requireConnection(ctx, config);
-      await browser.reload(true);
-      const wait = params.waitMs ?? config.reloadWaitMs;
-      if (wait > 0) await sleep(wait, signal);
+      await browser.reloadFresh(params.waitMs ?? config.reloadWaitMs, signal);
       const issues = browser.getBuffered(config.includeWarnings);
       const suffix =
         issues.length > 0
@@ -546,9 +549,7 @@ export default function (pi: ExtensionAPI) {
       const config = cfg(ctx);
       if (!browser.connected) await requireConnection(ctx, config);
       if (params.reload) {
-        browser.clearBuffer();
-        await browser.reload(true);
-        await browser.checkAfterEdit({ ...config, autoReloadOnEdit: false }, signal);
+        await browser.reloadFresh(config.reloadWaitMs, signal);
       }
       const minStatus = params.minStatus ?? 400;
       const failures = browser.getNetworkFailures().filter(
@@ -656,8 +657,7 @@ export default function (pi: ExtensionAPI) {
             ctx.ui.notify("Not connected. Run /browser connect first.", "warning");
             return;
           }
-          await browser.reload(true);
-          await browser.checkAfterEdit(config, undefined);
+          await browser.reloadFresh(config.reloadWaitMs);
           const issues = browser.getBuffered(config.includeWarnings);
           ctx.ui.notify(
             issues.length ? formatReportForConfig(issues, "After reload:", config) : "Reloaded — no console errors.",
