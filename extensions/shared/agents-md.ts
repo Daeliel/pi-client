@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { detectStacks } from "./stack-detect";
 
 const CONTEXT_NAMES = ["AGENTS.md", "CLAUDE.md"] as const;
 
@@ -17,11 +17,6 @@ export interface EnsureAgentsMdResult {
   created: boolean;
   path: string | null;
   skippedReason?: string;
-}
-
-/** Package root (pi-client), resolved from this module's location. */
-export function piClientPackageRoot(): string {
-  return path.join(fileURLToPath(new URL(".", import.meta.url)), "../..");
 }
 
 function findGitRoot(start: string): string | null {
@@ -74,12 +69,61 @@ function isPiClientFoundation(projectRoot: string): boolean {
   }
 }
 
-function loadScaffoldTemplate(): string {
-  const templatePath = path.join(piClientPackageRoot(), "templates", "AGENTS.md.example");
-  if (!fs.existsSync(templatePath)) {
-    throw new Error(`AGENTS.md template missing: ${templatePath}`);
+function packageScripts(projectRoot: string): Record<string, string> {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    return pkg.scripts ?? {};
+  } catch {
+    return {};
   }
-  return fs.readFileSync(templatePath, "utf8");
+}
+
+/**
+ * AGENTS.md content built from what can be detected — never example text.
+ *
+ * The old scaffold copied a template full of "(e.g. Flutter web, React + Vite)"
+ * placeholders. AGENTS.md is read on every turn, and small models took those
+ * examples as facts about the project. Sections the user still has to fill in are
+ * HTML comments; lines outside comments are true for this project.
+ */
+export function renderAgentsMd(projectRoot: string, platform: NodeJS.Platform = process.platform): string {
+  const detection = detectStacks(projectRoot);
+  const scripts = packageScripts(projectRoot);
+  const scriptLines = Object.entries(scripts)
+    .filter(([name]) => ["dev", "start", "build", "test", "lint", "typecheck", "preview"].includes(name))
+    .map(([name, cmd]) => `- \`npm run ${name}\` → \`${cmd}\``);
+
+  const lines = [
+    "# Project notes for Pi",
+    "",
+    "<!-- Created by pi-client from what it could detect. Read on every turn: keep it short and true. -->",
+    "",
+    "## Stack",
+    "",
+    `- ${detection.summary}`,
+  ];
+  if (scriptLines.length > 0) lines.push("", "## Commands", "", ...scriptLines);
+  if (detection.playwright) {
+    lines.push(
+      "",
+      "## Dev server",
+      "",
+      `- Acceptance tests start the app with \`${detection.playwright.command}\` at ${detection.playwright.url} (see .pi/playwright.config.ts — keep it matching how this app really starts).`,
+    );
+  }
+  if (platform === "win32") {
+    lines.push("", "## Shell", "", "- Windows: when a command runs in Windows PowerShell 5, chain commands with `;` — `&&` fails there.");
+  }
+  lines.push(
+    "",
+    "## Rules",
+    "",
+    "<!-- Add what the agent cannot infer: folder layout, files not to touch, naming patterns, known quirks. -->",
+    "",
+  );
+  return lines.join("\n");
 }
 
 /**
@@ -106,6 +150,6 @@ export function ensureAgentsMd(cwd: string): EnsureAgentsMdResult {
     return { created: false, path: target, skippedReason: "AGENTS.md already exists" };
   }
 
-  fs.writeFileSync(target, loadScaffoldTemplate(), "utf8");
+  fs.writeFileSync(target, renderAgentsMd(projectRoot), "utf8");
   return { created: true, path: target };
 }

@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, foundationConfigPaths } from "../shared/config-paths";
+import { readJsonConfig } from "../shared/json-config";
 
 export interface RunnerConfig {
   enabled?: boolean;
@@ -40,6 +41,13 @@ export interface HousekeepingConfig {
   auditOnAgentEnd: boolean;
   /** Exclude __*.spec.ts from auto-discovered runs (except __qa-capture). */
   skipScratchInAutoRun: boolean;
+  /** Delete __*.spec.ts scratch specs once the scenarios gate passes (task done). */
+  autoDeleteScratch: boolean;
+  /**
+   * After a passing gate, when housekeeping is warranted, let the model propose specs
+   * to scrap; the user confirms each removal. Also on demand: /scenarios review.
+   */
+  modelReview: boolean;
 }
 
 export interface ScenariosConfig {
@@ -55,7 +63,7 @@ export interface ScenariosConfig {
   playwrightConfig: string;
   /** Require define_scenarios before the gate passes. */
   requireDefined: boolean;
-  /** Only gate when code files were edited this task. */
+  /** Only gate when code files were edited this task (docs, notes, images and lockfiles do not count). */
   gateOnCodeChanges: boolean;
   /** Attach Playwright failure screenshots to run_scenarios / gate messages. */
   visionOnFailure: boolean;
@@ -107,6 +115,8 @@ export const DEFAULT_CONFIG: ScenariosConfig = {
     maxSpecsBeforeAudit: 10,
     auditOnAgentEnd: true,
     skipScratchInAutoRun: true,
+    autoDeleteScratch: true,
+    modelReview: false,
   },
   web: {
     enabled: true,
@@ -126,12 +136,7 @@ export const DEFAULT_CONFIG: ScenariosConfig = {
 };
 
 function readJson(file: string): Partial<ScenariosConfig> | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return null;
-  }
+  return readJsonConfig<ScenariosConfig>(file);
 }
 
 function mergeRunner(base: RunnerConfig, override: Partial<RunnerConfig> | undefined): RunnerConfig {
@@ -215,6 +220,17 @@ function writeQaShotPartial(
     ...existing,
     qaShot: { ...prevQa, ...patch },
   };
+  fs.writeFileSync(target, `${JSON.stringify(toWrite, null, 2)}\n`, "utf8");
+  return target;
+}
+
+/** Save housekeeping.maxSpecsBeforeAudit to the project config (spec count before tidy hints/reviews). */
+export function persistMaxSpecsBeforeAudit(cwd: string, max: number): string {
+  const target = projectScenariosConfigPath(cwd);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const existing = readJson(target) ?? {};
+  const prev = (existing.housekeeping ?? {}) as Partial<HousekeepingConfig>;
+  const toWrite = { ...existing, housekeeping: { ...prev, maxSpecsBeforeAudit: max } };
   fs.writeFileSync(target, `${JSON.stringify(toWrite, null, 2)}\n`, "utf8");
   return target;
 }

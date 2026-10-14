@@ -23,7 +23,7 @@ Eleven Pi extensions, three skills, four prompt templates, and a config layering
 
 | Extension | What it does |
 |---|---|
-| **anti-loop** | Breaks weak-model thrash. Blocks identical tool calls after 3 repeats, aborts mid-stream when the thinking channel cycles the same plan lines, auto-continues on max-output-token truncation, recovers Hermes/Qwen "ghost" `<tool_call>` XML (written as text, never executed), and hard-stops the agent after 2 recoveries so a stuck model can't pin your GPU. `/anti-loop on\|off\|status\|reset`· **User-help** mode: when the model keeps changing its mind without repeating itself (or you type while it works), it stops investigating and asks you for what it cannot observe (where it broke, console output, the exact click). Also entered after a hard stop. `/stuck`, `/stuck off` |
+| **anti-loop** | Breaks weak-model thrash. Blocks a tool call repeated 3 times with no edit in between (also when calls alternate, A,B,A,B,A), aborts mid-stream when the thinking channel cycles the same plan lines, auto-continues on max-output-token truncation, recovers "ghost" tool calls written as text (Hermes `<tool_call>`, `<function_call>`, `[TOOL_CALLS]`, bare JSON), and hard-stops the agent after 2 recoveries without progress so a stuck model can't pin your GPU. A successful edit counts as progress and resets the budget. `/anti-loop on\|off\|status\|reset` · **User-help** mode: when the model is going in circles — or you type while it is visibly thrashing — it stops investigating and asks you for what it cannot observe (where it broke, console output, the exact click). Ordinary steering while it works is delivered as-is. Also entered after a hard stop. `/stuck`, `/stuck off` |
 | **verify** | Blocking lint/build/test gate. Lints changed files inline after every edit; at the end of each turn runs the full check suite and, if it fails, re-triggers a fix turn with a classified failure report (max 5 attempts, then it gives up cleanly). Python (ruff/pytest), Node (eslint/tsc/npm test), C# (dotnet) out of the box; any language via config. `/verify`, `/doctor` |
 | **scenarios** | Acceptance-test gate. The model must *define* user-visible flows (`define_scenarios`), write runnable specs (Playwright for web, pytest for API, scripts otherwise), and *pass* them (`run_scenarios`) before finishing. Includes spec-quality auditing (catches "weak proof" specs that pass without actually testing the flow), failure screenshots fed back as vision input, an optional visual-QA screenshot gate (model- or human-approved), and spec housekeeping. `/scenarios …` |
 | **browser-console** | Attaches to a live Chrome/Edge via CDP (auto-launches a debug profile if needed). Console errors after web edits come back inline in the edit result; remaining errors block the finish. Also: network failure reports, live-tab screenshots with Playwright fallback, navigate/reload tools. `/browser …` |
@@ -118,7 +118,7 @@ Frequently used toggles:
 
 ## Per-project notes (AGENTS.md)
 
-pi-client's procedures are global; anything specific to one app (dev-server command, port, folder conventions, "do not touch" areas) belongs in that repo's `AGENTS.md` (or `CLAUDE.md`). pi-client auto-creates it from [`templates/AGENTS.md.example`](templates/AGENTS.md.example) on first session. Keep it short — it's loaded into context every turn.
+pi-client's procedures are global; anything specific to one app (dev-server command, port, folder conventions, "do not touch" areas) belongs in that repo's `AGENTS.md` (or `CLAUDE.md`). On first session pi-client creates it from what it can detect (stack, package scripts, dev-server hint) — only true facts, no example text, because small models treat everything in it as fact. Add your rules under **Rules**; [`templates/AGENTS.md.example`](templates/AGENTS.md.example) lists sections worth considering. Keep it short — it's loaded into context every turn.
 
 Each web project also gets `.pi/playwright.config.ts` (auto-scaffolded) — make sure its `webServer.command` and `baseURL` match how the app actually starts, it's the #1 cause of failing captures.
 
@@ -126,9 +126,13 @@ Each web project also gets `.pi/playwright.config.ts` (auto-scaffolded) — make
 
 ```bash
 npm install
-npm run typecheck   # tsc --noEmit
-npm test            # node:test suites for detectors, gates, scaffolds
+npm run typecheck        # extensions and tests
+npm test                 # unit tests + integration tests
+npm run test:it          # integration tests only
+npm run measure:prompt -- "build a settings page"   # prompt sections + active tools a model gets
 ```
+
+Integration tests (`test/*.it.ts`) run a real Pi session against Pi's scripted "faux" model in a temp project with its own HOME, so gate loops, anti-loop recovery, tool activation and the vision relay are tested end to end — no GPU or API key needed.
 
 Repo layout: `extensions/*/index.ts` is each extension's entry point; `extensions/shared/` holds the gate orchestrator, stack detection, and failure classification; `skills/`, `prompts/`, `templates/` are content; `bootstrap/` + `scripts/` are install plumbing.
 

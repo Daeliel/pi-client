@@ -1,14 +1,23 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "typebox";
-import { loadConfig, persistQaShotEnabled, persistQaShotMode, type ScenariosConfig } from "./config";
+import {
+  loadConfig,
+  persistMaxSpecsBeforeAudit,
+  persistQaShotEnabled,
+  persistQaShotMode,
+  type ScenariosConfig,
+} from "./config";
 import {
   ensureScenariosDir,
   ensurePlaywrightProjectDeps,
   ensureWebScaffold,
   formatDefinitions,
   formatReport,
+  formatScenarioProgress,
   runScenarios,
+  type ScenarioProgress,
   toolchainStatus,
   validateDefinitions,
 } from "./engine";
@@ -17,16 +26,28 @@ import {
   formatDiscoveredSummary,
   mergeScenarioLists,
   resolveEffectiveScenarios,
+  specPathKey,
+  splitVanishedScenarios,
 } from "./discover";
 import {
   applyCanonicalDeletions,
   auditScenarios,
   deleteScratchFiles,
+  deleteSpecFiles,
   formatCompactTidyHint,
   formatTidyReport,
   setCanonicalPick,
 } from "./housekeeping";
 import { formatSpecPatternWarnings, scanSpecPatterns } from "./spec-audit";
+import {
+  alreadyReviewed,
+  buildPendingReview,
+  buildReviewPrompt,
+  markReviewed,
+  reviewReason,
+  validateProposal,
+  type PendingReview,
+} from "./review";
 import { collectPreflightWarnings } from "./preflight";
 import { buildScenariosProcedure } from "./procedure";
 import type { ScenarioDefinition } from "./types";
@@ -37,18 +58,33 @@ import {
 } from "./vision";
 import { presentVisionToSession } from "../shared/vision-relay";
 import { scaffoldScenario } from "./scaffold";
-import { resetGateClaim, tryClaimGate, isGateClaimed } from "../shared/gate-orchestrator";
+import { resetGateClaim, tryClaimGate, isGateClaimed, registerGateReset } from "../shared/gate-orchestrator";
+import { extractEditPath, isCodePath, isEditTool } from "../shared/edit-tools";
 import { classifyScenarioFailure, formatClassifiedFailure } from "../shared/failure-classify";
 import { detectStacks, formatStackDoctorLines, shouldInjectWebProcedure } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
+import { syncOwnedTools } from "../shared/tool-activation";
+import { attemptNotes, giveUpNote, RepeatTracker } from "../shared/gate-messages";
+
+const TOOLS = [
+  "scaffold_scenario",
+  "define_scenarios",
+  "run_scenarios",
+  "capture_page_screenshot",
+  "confirm_visual_qa",
+  "scenarios_housekeep",
+  "list_scenarios",
+  "propose_scenario_cleanup",
+];
 const WEB_FILE = /\.(html?|js|mjs|cjs|jsx|ts|tsx|css|vue|svelte)$/i;
 
 function isWebFile(filePath: string): boolean {
   return WEB_FILE.test(filePath.replace(/\\/g, "/"));
 }
 
-const EDIT_TOOLS = new Set(["write", "edit", "create", "multiedit", "apply_patch", "str_replace"]);
 const STATE_TYPE = "foundation-scenarios-state";
+/** Upper bound for a spec cap set by the model or /scenarios cap. */
+const MAX_SPEC_CAP = 200;
 
 interface PersistedState {
   changedFiles?: string[];
@@ -58,6 +94,8 @@ interface PersistedState {
   visualQaConfirmed?: boolean;
   lastRunById?: Record<string, "pass" | "fail" | "skip">;
   specsCreatedThisSession?: string[];
+  /** Spec paths (specPathKey) seen on disk — a registered one that disappears was renamed or deleted. */
+  seenSpecFiles?: string[];
 }
 
 const ScenarioSchema = Type.Object({
@@ -75,24 +113,27 @@ const ScenarioSchema = Type.Object({
   }),
 });
 
-function extractPath(input: unknown): string | null {
-  if (!input || typeof input !== "object") return null;
-  const obj = input as Record<string, unknown>;
-  for (const key of ["path", "file_path", "filePath", "filename", "file"]) {
-    const v = obj[key];
-    if (typeof v === "string" && v.length > 0) return v;
-  }
-  return null;
-}
-
 export default function (pi: ExtensionAPI) {
+  registerGateReset(pi);
   const changedFiles = new Set<string>();
   let fixAttempts = 0;
   let qaFixAttempts = 0;
+  const repeats = new RepeatTracker();
   let visualQaConfirmed = false;
   let scenarios: ScenarioDefinition[] = [];
   let lastRunById: Record<string, "pass" | "fail" | "skip"> = {};
   let specsCreatedThisSession: string[] = [];
+  const seenSpecFiles = new Set<string>();
+  /** Scenarios dropped by the last reconcile, reported once with the next run. */
+  let vanishedNote = "";
+  /** Model housekeeping review: due after a green gate, sent once the run settles. */
+  let reviewDue: { protectedFiles: string[] } | null = null;
+  /** The review the model is answering (propose_scenario_cleanup is active only then). */
+  let activeReview: PendingReview | null = null;
+  /** Set right before the review prompt is sent, consumed by its before_agent_start. */
+  let reviewPromptArmed = false;
+  /** The review prompt's run is in progress; its agent_end closes the review. */
+  let reviewRunning = false;
   let configCache: ScenariosConfig | null = null;
 
   function cfg(ctx: ExtensionContext): ScenariosConfig {
@@ -117,6 +158,15 @@ export default function (pi: ExtensionAPI) {
     return [...changedFiles].some(isWebFile);
   }
 
+  /** The model's last reply may claim success; its next turn must know the gate gave up. */
+  function leaveGiveUpNote(attempts: number, evidence: string) {
+    pi.sendMessage(
+      { customType: "foundation-gate", content: giveUpNote("scenarios", attempts, evidence), display: true },
+      { deliverAs: "nextTurn" },
+    );
+    repeats.reset();
+  }
+
   function persist() {
     pi.appendEntry<PersistedState>(STATE_TYPE, {
       changedFiles: [...changedFiles],
@@ -126,6 +176,7 @@ export default function (pi: ExtensionAPI) {
       visualQaConfirmed,
       lastRunById,
       specsCreatedThisSession,
+      seenSpecFiles: [...seenSpecFiles],
     });
   }
 
@@ -141,6 +192,79 @@ export default function (pi: ExtensionAPI) {
     return n.includes("/.pi/scenarios/") && (n.endsWith(".spec.ts") || n.endsWith(".test.py"));
   }
 
+  /**
+   * Model-facing tools for this project and config. Housekeeping and listing stay
+   * on /scenarios for the user; the screenshot tool only exists for web UIs, and
+   * confirm_visual_qa only when the model is the one approving QA shots.
+   */
+  function syncTools(ctx: ExtensionContext) {
+    const config = cfg(ctx);
+    if (!config.enabled) {
+      syncOwnedTools(pi, TOOLS, []);
+      return;
+    }
+    const wanted = ["scaffold_scenario", "define_scenarios", "run_scenarios"];
+    if (shouldInjectWebProcedure(ctx.cwd, changedFiles)) wanted.push("capture_page_screenshot");
+    if (qaMode(config) === "model") wanted.push("confirm_visual_qa");
+    if (activeReview) wanted.push("propose_scenario_cleanup");
+    syncOwnedTools(pi, TOOLS, wanted);
+  }
+
+  pi.on("input", async (_event, ctx) => {
+    configCache = null;
+    // Any prompt other than the review prompt itself ends a pending review.
+    if (reviewPromptArmed) {
+      reviewPromptArmed = false;
+      reviewRunning = true;
+    } else if (activeReview && !reviewRunning) {
+      activeReview = null;
+    }
+    syncTools(ctx);
+  });
+
+  /**
+   * Start a model review of the spec list: the model answers with
+   * propose_scenario_cleanup, the user confirms, the extension deletes.
+   * Returns a message when there is nothing to review.
+   */
+  function startReview(ctx: ExtensionContext, protectedFiles: string[]): string | null {
+    const config = cfg(ctx);
+    const discovered = discoverScenariosFromDisk(ctx.cwd, config);
+    const audit = auditScenarios(ctx.cwd, config, discovered, lastRunById);
+    const review = buildPendingReview(ctx.cwd, discovered, audit, lastRunById, protectedFiles);
+    if (review.candidates.length === 0) return "No specs to review.";
+    markReviewed(ctx.cwd, config, discovered);
+    activeReview = review;
+    reviewPromptArmed = true;
+    const cap = { current: config.housekeeping.maxSpecsBeforeAudit, total: discovered.length };
+    pi.sendUserMessage(buildReviewPrompt(review, reviewReason(audit), cap), { deliverAs: "followUp" });
+    return null;
+  }
+
+  // During a review the user decides what goes; the model only proposes.
+  pi.on("tool_call", async (event, ctx) => {
+    if (!reviewRunning) return;
+    const input = ("input" in event ? event.input : undefined) as Record<string, unknown> | undefined;
+    const editPath = isEditTool(event.toolName) ? extractEditPath(input) : null;
+    const command = typeof input?.command === "string" ? input.command : "";
+    const touchesSpecs =
+      (editPath !== null && isScenarioSpecPath(path.resolve(ctx.cwd, editPath))) ||
+      (/\.pi[\\/]+scenarios/i.test(command) && /\b(rm|del|mv|move|rename|unlink|Remove-Item|Move-Item)\b/i.test(command));
+    if (!touchesSpecs) return;
+    return {
+      block: true,
+      reason: "Scenario review: do not change spec files yourself — list them in propose_scenario_cleanup and the user decides.",
+    };
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    if (!reviewDue || activeReview) return;
+    const due = reviewDue;
+    reviewDue = null;
+    if (!ctx.hasUI) return;
+    startReview(ctx, due.protectedFiles);
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom" && entry.customType === STATE_TYPE) {
@@ -153,9 +277,12 @@ export default function (pi: ExtensionAPI) {
         visualQaConfirmed = data?.visualQaConfirmed ?? false;
         lastRunById = data?.lastRunById ?? {};
         specsCreatedThisSession = data?.specsCreatedThisSession ?? [];
+        seenSpecFiles.clear();
+        for (const f of data?.seenSpecFiles ?? []) seenSpecFiles.add(f);
       }
     }
 
+    syncTools(ctx);
     const config = cfg(ctx);
     if (!config.enabled || !ctx.hasUI) return;
 
@@ -174,6 +301,7 @@ export default function (pi: ExtensionAPI) {
     configCache = null;
     fixAttempts = 0;
     qaFixAttempts = 0;
+    repeats.reset();
     const config = cfg(ctx);
     if (!config.enabled) return;
 
@@ -201,9 +329,9 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_result", async (event, ctx) => {
     const config = cfg(ctx);
-    if (!config.enabled || !EDIT_TOOLS.has(event.toolName)) return;
+    if (!config.enabled || !isEditTool(event.toolName)) return;
 
-    const p = extractPath(event.input);
+    const p = extractEditPath(event.input);
     if (p && !changedFiles.has(p)) {
       changedFiles.add(p);
       if (isWebFile(p)) {
@@ -212,6 +340,7 @@ export default function (pi: ExtensionAPI) {
       if (isScenarioSpecPath(p) && !specsCreatedThisSession.includes(p)) {
         specsCreatedThisSession.push(p);
       }
+      if (isScenarioSpecPath(p)) seenSpecFiles.add(specPathKey(ctx.cwd, p));
       persist();
     }
   });
@@ -237,8 +366,60 @@ export default function (pi: ExtensionAPI) {
     pi.sendUserMessage(content, { deliverAs: "followUp" });
   }
 
+  /**
+   * Reconcile the registry with the disk: a registered spec that existed and is now
+   * gone was renamed or deleted, so stop scheduling it (instead of failing it as
+   * "missing — create it" on every gate run, which loops a model that moved it).
+   */
+  function reconcileRegistry(ctx: ExtensionContext) {
+    const { kept, vanished } = splitVanishedScenarios(ctx.cwd, scenarios, seenSpecFiles);
+    for (const s of kept) {
+      if (fs.existsSync(path.resolve(ctx.cwd, s.testFile))) seenSpecFiles.add(specPathKey(ctx.cwd, s.testFile));
+    }
+    if (vanished.length === 0) return;
+    scenarios = kept;
+    for (const s of vanished) {
+      delete lastRunById[s.id];
+      seenSpecFiles.delete(specPathKey(ctx.cwd, s.testFile));
+    }
+    vanishedNote =
+      `Dropped ${vanished.length} registered scenario(s) whose spec file was renamed or deleted:\n` +
+      vanished.map((s) => `  - ${s.id}: ${s.testFile}`).join("\n") +
+      `\nSpecs on disk are still auto-discovered; call define_scenarios to re-register under new names.\n\n`;
+    persist();
+  }
+
   function effectiveScenarios(ctx: ExtensionContext): ScenarioDefinition[] {
+    reconcileRegistry(ctx);
     return resolveEffectiveScenarios(ctx.cwd, scenarios, cfg(ctx));
+  }
+
+  /** Prefix a run report with the reconcile note (once). */
+  function withVanishedNote(report: string): string {
+    const note = vanishedNote;
+    vanishedNote = "";
+    return `${note}${report}`;
+  }
+
+  /**
+   * Show "Scenario 3/10: id" while a run is in progress: in the working indicator
+   * (visible while the agent streams) and the footer status (visible when idle,
+   * e.g. /scenarios run). Call done() when the run ends.
+   */
+  function runProgress(ctx: ExtensionContext, label: string) {
+    return {
+      update(p: ScenarioProgress) {
+        if (!ctx.hasUI) return;
+        const text = formatScenarioProgress(p);
+        ctx.ui.setWorkingMessage(`${label} — ${text}`);
+        ctx.ui.setStatus("scenarios", text);
+      },
+      done() {
+        if (!ctx.hasUI) return;
+        ctx.ui.setWorkingMessage();
+        ctx.ui.setStatus("scenarios", undefined);
+      },
+    };
   }
 
   async function buildRunScenariosResponse(
@@ -272,12 +453,26 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("agent_end", async (_event, ctx) => {
+    if (reviewRunning) {
+      // The review turn is over, answered or not.
+      reviewRunning = false;
+      activeReview = null;
+      syncTools(ctx);
+    }
     const config = cfg(ctx);
     if (!config.enabled || !config.blocking) return;
-    if (config.gateOnCodeChanges && changedFiles.size === 0) return;
+    if (config.gateOnCodeChanges && ![...changedFiles].some(isCodePath)) {
+      // Docs/notes/assets only — nothing behavioural to prove. Forget them so they
+      // do not make a later unrelated turn look like a code change.
+      if (changedFiles.size > 0) {
+        changedFiles.clear();
+        persist();
+      }
+      return;
+    }
     if (isGateClaimed()) return;
 
-    await withGateWorkingMessage(ctx, "Acceptance gates (scenarios/QA) — inference idle", async () => {
+    await withGateWorkingMessage(ctx, "Acceptance gates (scenarios/QA) — inference idle", async (status) => {
       const toRun = effectiveScenarios(ctx);
 
       if (config.requireDefined && toRun.length === 0) {
@@ -286,6 +481,7 @@ export default function (pi: ExtensionAPI) {
             `No acceptance scenarios defined after ${config.maxFixAttempts} attempts — stopping the fix loop.`,
             "error",
           );
+          leaveGiveUpNote(fixAttempts, "no acceptance scenarios were defined or written for the code change");
           changedFiles.clear();
           fixAttempts = 0;
           persist();
@@ -294,25 +490,37 @@ export default function (pi: ExtensionAPI) {
         if (!tryClaimGate("scenarios")) return;
         fixAttempts += 1;
         persist();
+        const last = attemptNotes(fixAttempts, config.maxFixAttempts, false);
         pi.sendUserMessage(
           `You changed code but no acceptance scenarios are defined (attempt ${fixAttempts}/${config.maxFixAttempts}). ` +
             `Call define_scenarios (or optional scaffold_scenario) with each user-visible flow, write the test files under ${config.scenariosDir}, ` +
-            `then call run_scenarios before finishing.`,
+            `then call run_scenarios before finishing.` +
+            (last ? `\n${last}` : ""),
           { deliverAs: "followUp" },
         );
         return;
       }
 
       if (toRun.length > 0) {
-        const result = await runScenarios(ctx.cwd, toRun, config, ctx.signal);
+        const result = await runScenarios(ctx.cwd, toRun, config, ctx.signal, undefined, (p) =>
+          status.step(formatScenarioProgress(p)),
+        );
         if (ctx.signal?.aborted) return;
 
         if (result.failed) {
+          const report = withVanishedNote(formatReport(result, toRun));
+          const classified = classifyScenarioFailure({
+            report,
+            preflightWarnings: result.preflightWarnings,
+            weakSpecBlocking: Boolean(result.weakSpecWarnings?.some((w) => w.blocking)),
+            missingFiles: result.missingFiles,
+          });
           if (fixAttempts >= config.maxFixAttempts) {
             ctx.ui.notify(
               `Scenarios still failing after ${config.maxFixAttempts} attempts — stopping the fix loop. Run /scenarios run`,
               "error",
             );
+            leaveGiveUpNote(fixAttempts, classified.evidence);
             changedFiles.clear();
             scenarios = [];
             fixAttempts = 0;
@@ -325,17 +533,12 @@ export default function (pi: ExtensionAPI) {
           if (!tryClaimGate("scenarios")) return;
           fixAttempts += 1;
           persist();
-          const report = formatReport(result, toRun);
-          const classified = classifyScenarioFailure({
-            report,
-            preflightWarnings: result.preflightWarnings,
-            weakSpecBlocking: Boolean(result.weakSpecWarnings?.some((w) => w.blocking)),
-            missingFiles: result.missingFiles,
-          });
+          const notes = attemptNotes(fixAttempts, config.maxFixAttempts, repeats.repeated(report));
           const intro = formatClassifiedFailure(
             classified,
             `Acceptance scenarios failed (attempt ${fixAttempts}/${config.maxFixAttempts}). ` +
-              `Fix the app or tests — do not finish while scenarios fail.`,
+              `Fix the app or tests — do not finish while scenarios fail.` +
+              (notes ? `\n${notes}` : ""),
             { screens: config.visionOnFailure ? result.screenshots : undefined },
           );
           const shots = config.visionOnFailure ? (result.screenshots ?? []) : [];
@@ -360,6 +563,7 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
+        status.step("capturing visual QA screenshot");
         const capture = await captureQaShot(ctx.cwd, config, ctx.signal);
         if (ctx.signal?.aborted) return;
 
@@ -399,7 +603,26 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      if (config.housekeeping.enabled && config.housekeeping.auditOnAgentEnd && ctx.hasUI) {
+      // Gate passed, task done: scratch specs (__*.spec.ts) were throwaway probes.
+      if (config.housekeeping.enabled && config.housekeeping.autoDeleteScratch) {
+        const { deleted } = deleteScratchFiles(ctx.cwd, discoverScenariosFromDisk(ctx.cwd, config));
+        if (deleted.length > 0 && ctx.hasUI) {
+          ctx.ui.notify(`Deleted scratch spec(s) after a passing gate:\n${deleted.map((f) => `  - ${f}`).join("\n")}`, "info");
+        }
+      }
+
+      // Model review replaces the tidy hint: queued here, sent once every gate has settled.
+      let reviewQueued = false;
+      if (config.housekeeping.enabled && config.housekeeping.modelReview && ctx.hasUI) {
+        const discovered = discoverScenariosFromDisk(ctx.cwd, config);
+        const audit = auditScenarios(ctx.cwd, config, discovered, lastRunById);
+        if (reviewReason(audit) && !alreadyReviewed(ctx.cwd, config, discovered)) {
+          reviewDue = { protectedFiles: [...scenarios.map((s) => s.testFile), ...specsCreatedThisSession] };
+          reviewQueued = true;
+        }
+      }
+
+      if (config.housekeeping.enabled && config.housekeeping.auditOnAgentEnd && ctx.hasUI && !reviewQueued) {
         const discovered = discoverScenariosFromDisk(ctx.cwd, config);
         const audit = auditScenarios(ctx.cwd, config, discovered, lastRunById);
         const hint = formatCompactTidyHint(audit);
@@ -418,6 +641,8 @@ export default function (pi: ExtensionAPI) {
       qaFixAttempts = 0;
       visualQaConfirmed = false;
       specsCreatedThisSession = [];
+      seenSpecFiles.clear();
+      vanishedNote = "";
       persist();
     });
   });
@@ -569,7 +794,7 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
     }),
-    async execute(_id, params, signal, _onUpdate, ctx) {
+    async execute(_id, params, signal, onUpdate, ctx) {
       const config = cfg(ctx);
       const toRun = effectiveScenarios(ctx);
       if (toRun.length === 0) {
@@ -595,14 +820,24 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      const result = await runScenarios(
-        ctx.cwd,
-        toRun,
-        config,
-        signal,
-        filterIds ? new Set([...filterIds]) : undefined,
-      );
-      const report = formatReport(result, toRun);
+      const progress = runProgress(ctx, "Running scenarios");
+      let result: Awaited<ReturnType<typeof runScenarios>>;
+      try {
+        result = await runScenarios(
+          ctx.cwd,
+          toRun,
+          config,
+          signal,
+          filterIds ? new Set([...filterIds]) : undefined,
+          (p) => {
+            progress.update(p);
+            onUpdate?.({ content: [{ type: "text", text: `${formatScenarioProgress(p)}…` }], details: { progress: p } });
+          },
+        );
+      } finally {
+        progress.done();
+      }
+      const report = withVanishedNote(formatReport(result, toRun));
       recordRunResults(result, toRun);
       if (result.failed) {
         const classified = classifyScenarioFailure({
@@ -716,6 +951,117 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "propose_scenario_cleanup",
+    label: "Propose Scenario Cleanup",
+    description:
+      "Answer a scenario housekeeping review: list spec files to remove, each with a one-line reason. " +
+      "The user confirms each removal and the extension deletes them — never delete spec files yourself.",
+    promptSnippet: "Propose specs to scrap or a higher spec cap (user confirms)",
+    parameters: Type.Object({
+      remove: Type.Array(
+        Type.Object({
+          file: Type.String({ description: "Spec path exactly as listed in the review." }),
+          reason: Type.String({ description: "One line: why it is no longer worth keeping." }),
+        }),
+        { description: "Specs to remove. Empty when every spec is still worth keeping." },
+      ),
+      cap: Type.Optional(
+        Type.Object(
+          {
+            value: Type.Integer({ description: "New spec count before tidy hints/reviews fire." }),
+            reason: Type.String({ description: "One line: why this project needs that many specs." }),
+          },
+          {
+            description:
+              "Propose a higher spec cap when the specs are all worth keeping and the project's breadth needs more than the current cap.",
+          },
+        ),
+      ),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const review = activeReview;
+      if (!review) {
+        return {
+          content: [{ type: "text", text: "No scenario review is pending — nothing to propose." }],
+          details: { ok: false },
+          isError: true,
+        };
+      }
+      const config = cfg(ctx);
+      const { valid, rejected } = validateProposal(ctx.cwd, review, params.remove);
+      const notes: string[] = rejected.length ? [`Not allowed: ${rejected.join("; ")}`] : [];
+      activeReview = null;
+      syncTools(ctx);
+
+      let chosen: typeof valid = [];
+      if (ctx.hasUI && valid.length > 0) {
+        const list = valid.map((r) => `  - ${r.file} — ${r.reason}`).join("\n");
+        if (valid.length === 1) {
+          if (await ctx.ui.confirm("Scenario cleanup", `The model suggests removing:\n${list}\n\nDelete it?`)) chosen = valid;
+        } else {
+          const all = `Delete all ${valid.length}`;
+          const oneByOne = "Choose one by one";
+          const pick = await ctx.ui.select(`Scenario cleanup — the model suggests removing:\n${list}`, [
+            all,
+            oneByOne,
+            "Keep all",
+          ]);
+          if (pick === all) chosen = valid;
+          else if (pick === oneByOne) {
+            for (const r of valid) {
+              if (await ctx.ui.confirm("Remove this spec?", `${r.file}\n${r.reason}`)) chosen.push(r);
+            }
+          }
+        }
+      }
+
+      const deleted = deleteSpecFiles(
+        ctx.cwd,
+        config,
+        chosen.map((r) => r.file),
+      );
+      if (deleted.length > 0) {
+        const gone = new Set(deleted.map((f) => specPathKey(ctx.cwd, f)));
+        for (const s of scenarios) if (gone.has(specPathKey(ctx.cwd, s.testFile))) delete lastRunById[s.id];
+        scenarios = scenarios.filter((s) => !gone.has(specPathKey(ctx.cwd, s.testFile)));
+        for (const k of gone) seenSpecFiles.delete(k);
+        markReviewed(ctx.cwd, config, discoverScenariosFromDisk(ctx.cwd, config));
+        persist();
+      }
+      const kept = valid.filter((r) => !deleted.includes(r.file)).map((r) => r.file);
+      const parts: string[] = [];
+      if (valid.length === 0) parts.push("Nothing proposed for removal — all specs kept.");
+      else if (deleted.length) parts.push(`User approved — deleted: ${deleted.join(", ")}.${kept.length ? ` Kept: ${kept.join(", ")}.` : ""}`);
+      else parts.push("User kept every spec.");
+
+      let capSet: number | undefined;
+      if (params.cap) {
+        const current = config.housekeeping.maxSpecsBeforeAudit;
+        const value = params.cap.value;
+        if (!Number.isInteger(value) || value <= current || value > MAX_SPEC_CAP) {
+          notes.push(`Cap ${value} not offered — it must be a whole number above the current ${current} and at most ${MAX_SPEC_CAP}.`);
+        } else if (
+          ctx.hasUI &&
+          (await ctx.ui.confirm(
+            "Scenario cap",
+            `The model suggests raising the spec cap from ${current} to ${value}:\n${params.cap.reason}\n\nSave it to this project's scenarios config?`,
+          ))
+        ) {
+          persistMaxSpecsBeforeAudit(ctx.cwd, value);
+          configCache = null;
+          capSet = value;
+          parts.push(`User raised the spec cap to ${value}.`);
+        } else {
+          parts.push(`User kept the spec cap at ${current}.`);
+        }
+      }
+
+      const text = [...parts, ...notes, "Review done — reply in one line and stop. Do not touch spec files."].join("\n");
+      return { content: [{ type: "text", text }], details: { ok: true, deleted, kept, capSet } };
+    },
+  });
+
+  pi.registerTool({
     name: "scenarios_housekeep",
     label: "Scenarios Housekeep",
     description:
@@ -763,7 +1109,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("scenarios", {
     description:
-      "Acceptance scenarios — list | run | run-all | sync | tidy | pick | clear | doctor | qa on|off|status|model|human|approve [project]",
+      "Acceptance scenarios — list | run | run-all | sync | tidy | review | cap | pick | clear | doctor | qa on|off|status|model|human|approve [project]",
     handler: async (args, ctx) => {
       const config = cfg(ctx);
       if (!config.enabled) {
@@ -788,6 +1134,37 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      if (sub === "cap") {
+        const current = config.housekeeping.maxSpecsBeforeAudit;
+        const total = discoverScenariosFromDisk(ctx.cwd, config).length;
+        if (!parts[1]) {
+          ctx.ui.notify(
+            `Spec cap: ${current} (${total} spec(s) on disk). Tidy hints and model reviews start above it.\n/scenarios cap <n> — set it for this project.`,
+            "info",
+          );
+          return;
+        }
+        const value = Number(parts[1]);
+        if (!Number.isInteger(value) || value < 1 || value > MAX_SPEC_CAP) {
+          ctx.ui.notify(`Use a whole number from 1 to ${MAX_SPEC_CAP}.`, "warning");
+          return;
+        }
+        const file = persistMaxSpecsBeforeAudit(ctx.cwd, value);
+        configCache = null;
+        ctx.ui.notify(`Spec cap set to ${value} for this project (${total} on disk) — saved to ${file}.`, "info");
+        return;
+      }
+
+      if (sub === "review") {
+        if (!ctx.isIdle()) {
+          ctx.ui.notify("Wait until the agent is idle, then /scenarios review.", "warning");
+          return;
+        }
+        const nothing = startReview(ctx, [...scenarios.map((s) => s.testFile), ...specsCreatedThisSession]);
+        if (nothing) ctx.ui.notify(nothing, "info");
+        return;
+      }
+
       if (sub === "clear") {
         scenarios = [];
         fixAttempts = 0;
@@ -806,6 +1183,7 @@ export default function (pi: ExtensionAPI) {
           configCache = null;
           visualQaConfirmed = false;
           persist();
+          syncTools(ctx);
           ctx.ui.notify(`Visual QA shot enabled (saved to ${file}). Mode: ${cfg(ctx).qaShot.mode}`, "info");
           return;
         }
@@ -813,6 +1191,7 @@ export default function (pi: ExtensionAPI) {
           const file = persistQaShotMode(ctx.cwd, "off", scope);
           configCache = null;
           persist();
+          syncTools(ctx);
           ctx.ui.notify(`Visual QA shot disabled / mode off (saved to ${file}).`, "info");
           return;
         }
@@ -821,6 +1200,7 @@ export default function (pi: ExtensionAPI) {
           configCache = null;
           visualQaConfirmed = false;
           persist();
+          syncTools(ctx);
           ctx.ui.notify(`Visual QA mode: ${action} (saved to ${file}).`, "info");
           return;
         }
@@ -948,9 +1328,15 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify("No scenarios on disk or registered.", "warning");
           return;
         }
-        const result = await runScenarios(ctx.cwd, toRun, config);
+        const progress = runProgress(ctx, "Running scenarios");
+        let result: Awaited<ReturnType<typeof runScenarios>>;
+        try {
+          result = await runScenarios(ctx.cwd, toRun, config, undefined, undefined, progress.update);
+        } finally {
+          progress.done();
+        }
         recordRunResults(result, toRun);
-        const report = formatReport(result, toRun);
+        const report = withVanishedNote(formatReport(result, toRun));
         if (result.failed) {
           ctx.ui.notify("Scenarios failed — sending failures to the agent to fix.", "error");
           const failureShots = config.visionOnFailure ? (result.screenshots ?? []) : [];
@@ -972,9 +1358,15 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify("No scenarios defined or discovered. Try /scenarios sync.", "warning");
           return;
         }
-        const result = await runScenarios(ctx.cwd, toRun, config);
+        const progress = runProgress(ctx, "Running scenarios");
+        let result: Awaited<ReturnType<typeof runScenarios>>;
+        try {
+          result = await runScenarios(ctx.cwd, toRun, config, undefined, undefined, progress.update);
+        } finally {
+          progress.done();
+        }
         recordRunResults(result, toRun);
-        const report = formatReport(result, toRun);
+        const report = withVanishedNote(formatReport(result, toRun));
         if (result.failed) {
           ctx.ui.notify("Scenarios failed — sending failures to the agent to fix.", "error");
           const shots = config.visionOnFailure ? (result.screenshots ?? []) : [];
@@ -986,7 +1378,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       ctx.ui.notify(
-        "Usage: /scenarios list | run | run-all | sync | tidy | pick <group> <n> | clear | doctor | qa on|off|model|human|approve|status [project]",
+        "Usage: /scenarios list | run | run-all | sync | tidy | review | cap | pick <group> <n> | clear | doctor | qa on|off|model|human|approve|status [project]",
         "info",
       );
     },

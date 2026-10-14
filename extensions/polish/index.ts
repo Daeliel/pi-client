@@ -45,14 +45,16 @@ import { listVisionModels, resolveCriticModel, runCriticCompletion } from "./cri
 import { presentVisionToSession } from "../shared/vision-relay";
 import { loadConfig as loadScenariosConfig } from "../scenarios/config";
 import { capturePageScreenshot, loadVisionImages, type VisionImageContent } from "../scenarios/vision";
-import { isGateClaimed, resetGateClaim, tryClaimGate } from "../shared/gate-orchestrator";
+import { isGateClaimed, resetGateClaim, tryClaimGate, registerGateReset } from "../shared/gate-orchestrator";
+import { extractEditPath, isEditTool } from "../shared/edit-tools";
 import { registerOnceModifier } from "../shared/once";
 import { detectStacks, isWebPath } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
+import { syncOwnedTools } from "../shared/tool-activation";
 
-const EDIT_TOOLS = new Set(["write", "edit", "create", "multiedit", "apply_patch", "str_replace"]);
 const STATE_TYPE = "foundation-polish-state";
 const WIDGET_KEY = "polish";
+const TOOLS = ["polish_report", "polish_surfaces"];
 
 interface PersistedState {
   sessionLevel?: PolishSetting | null;
@@ -86,16 +88,6 @@ interface TaskState {
   skippedNotice: boolean;
 }
 
-function extractPath(input: unknown): string | null {
-  if (!input || typeof input !== "object") return null;
-  const obj = input as Record<string, unknown>;
-  for (const key of ["path", "file_path", "filePath", "filename", "file"]) {
-    const v = obj[key];
-    if (typeof v === "string" && v.length > 0) return v;
-  }
-  return null;
-}
-
 /** UI source files only — never specs, tests, or anything under .pi/. */
 function isPolishableUiFile(p: string): boolean {
   const n = p.replace(/\\/g, "/").toLowerCase();
@@ -114,6 +106,7 @@ function shorten(s: string, n: number): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  registerGateReset(pi);
   let configCache: PolishConfig | null = null;
   let sessionLevel: PolishSetting | null = null;
   let promptLevel: PolishLevel | null = null;
@@ -271,15 +264,30 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  /**
+   * Polish tools only while polish can run. `newPrompt` is the text of a fresh user
+   * prompt (its level is not resolved yet — infer it the same way before_agent_start
+   * will); follow-ups keep the current task's level.
+   */
+  function syncTools(ctx: ExtensionContext, newPrompt?: string) {
+    const config = cfg(ctx);
+    let level: PolishSetting = newPrompt === undefined && task ? task.level : (promptLevel ?? sessionLevel ?? config.level);
+    if (level === "auto" && newPrompt !== undefined) level = inferLevel(newPrompt, detectStacks(ctx.cwd).hasWebUi).level;
+    syncOwnedTools(pi, TOOLS, config.enabled && level !== "off" ? TOOLS : []);
+  }
+
   // Real user input starts a new task. (/once arrives as extension input with the flags already armed.)
-  pi.on("input", async (event) => {
-    if (event.source === "extension") return { action: "continue" as const };
-    newUserPrompt = true;
-    const parsed = parseLevelPrefix(event.text);
-    if (parsed) {
-      promptLevel = parsed.level;
-      return { action: "transform" as const, text: parsed.text };
+  pi.on("input", async (event, ctx) => {
+    if (event.source === "extension") {
+      syncTools(ctx, newUserPrompt ? event.text : undefined);
+      return { action: "continue" as const };
     }
+    newUserPrompt = true;
+    configCache = null;
+    const parsed = parseLevelPrefix(event.text);
+    if (parsed) promptLevel = parsed.level;
+    syncTools(ctx, parsed ? parsed.text : event.text);
+    if (parsed) return { action: "transform" as const, text: parsed.text };
     return { action: "continue" as const };
   });
 
@@ -348,8 +356,8 @@ export default function (pi: ExtensionAPI) {
     const config = cfg(ctx);
     if (!config.enabled) return;
 
-    if (EDIT_TOOLS.has(event.toolName)) {
-      const p = extractPath(event.input);
+    if (isEditTool(event.toolName)) {
+      const p = extractEditPath(event.input);
       if (!p || event.isError) return;
       editSerial += 1;
       if (!isPolishableUiFile(p)) return;
@@ -785,6 +793,7 @@ export default function (pi: ExtensionAPI) {
           task.source = "session";
         }
         setStatus(ctx);
+        syncTools(ctx);
         return;
       }
 

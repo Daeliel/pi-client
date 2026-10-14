@@ -1,5 +1,5 @@
-import * as fs from "node:fs";
 import { foundationConfigPaths } from "../shared/config-paths";
+import { readJsonConfig } from "../shared/json-config";
 
 export interface ReleaseTargetConfig {
   /** Shell command (may start with `flutter` — resolved at run time). */
@@ -55,12 +55,7 @@ export const DEFAULT_CONFIG: ReleaseConfig = {
 };
 
 function readJson(file: string): Partial<ReleaseConfig> | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return null;
-  }
+  return readJsonConfig<ReleaseConfig>(file);
 }
 
 function mergeTargets(

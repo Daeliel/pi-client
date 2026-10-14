@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, foundationConfigPaths } from "../shared/config-paths";
+import { readJsonConfig } from "../shared/json-config";
 
 export interface AntiLoopConfig {
   enabled: boolean;
@@ -39,12 +40,7 @@ export const DEFAULT_CONFIG: AntiLoopConfig = {
 };
 
 function readJson(file: string): Partial<AntiLoopConfig> | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return null;
-  }
+  return readJsonConfig<AntiLoopConfig>(file);
 }
 
 export function loadConfig(cwd: string): AntiLoopConfig {

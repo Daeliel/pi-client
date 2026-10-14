@@ -31,7 +31,7 @@ This is **not** verify-on-edit and **not** Playwright scenarios.
 ### Config
 
 - Defaults: \`.pi/release.config.json\` (optional) — commands, artifact paths, flutterCommand if not on PATH
-- Example in pi-client: \`release.config.example.json\`
+- Fields: \`flutterCommand\` (full path to flutter when not on PATH), \`targets.<apk|appbundle>.command\` and \`.artifactPath\`
 
 ### Commands
 

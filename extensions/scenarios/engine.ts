@@ -1,5 +1,6 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import { clipMiddle, plainOutputEnv, stripAnsi } from "../shared/output";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ScenariosConfig, RunnerConfig } from "./config";
@@ -35,8 +36,9 @@ async function run(command: string, cwd: string, timeoutMs: number, signal?: Abo
       windowsHide: true,
       maxBuffer: 16 * 1024 * 1024,
       signal,
+      env: plainOutputEnv(),
     });
-    return { code: 0, out: `${stdout}${stderr}`.trim(), timedOut: false, aborted: false };
+    return { code: 0, out: stripAnsi(`${stdout}${stderr}`).trim(), timedOut: false, aborted: false };
   } catch (e: unknown) {
     const err = e as {
       stdout?: string;
@@ -50,7 +52,7 @@ async function run(command: string, cwd: string, timeoutMs: number, signal?: Abo
     if (err.name === "AbortError" || signal?.aborted) {
       return { code: 0, out: "", timedOut: false, aborted: true };
     }
-    const out = `${err.stdout ?? ""}${err.stderr ?? ""}`.trim() || err.message || "unknown error";
+    const out = stripAnsi(`${err.stdout ?? ""}${err.stderr ?? ""}`).trim() || err.message || "unknown error";
     const timedOut = Boolean(err.killed) || err.signal === "SIGTERM";
     const code = typeof err.code === "number" ? err.code : 1;
     return { code: timedOut ? 124 : code, out, timedOut, aborted: false };
@@ -232,12 +234,28 @@ export function validateDefinitions(
   return { valid, errors };
 }
 
+export interface ScenarioProgress {
+  /** 1-based index of the scenario about to run. */
+  index: number;
+  total: number;
+  scenario: ScenarioDefinition;
+  passed: number;
+  failed: number;
+}
+
+/** "Scenario 3/10: room-type-cycling (2 passed, 0 failed)". */
+export function formatScenarioProgress(p: ScenarioProgress): string {
+  const tally = p.index > 1 ? ` (${p.passed} passed, ${p.failed} failed)` : "";
+  return `Scenario ${p.index}/${p.total}: ${p.scenario.id}${tally}`;
+}
+
 export async function runScenarios(
   cwd: string,
   scenarios: ScenarioDefinition[],
   config: ScenariosConfig,
   signal?: AbortSignal,
   filterIds?: Set<string>,
+  onProgress?: (progress: ScenarioProgress) => void,
 ): Promise<ScenariosRunResult> {
   const checks: ScenarioCheckResult[] = [];
   const missingFiles: string[] = [];
@@ -256,7 +274,14 @@ export async function runScenarios(
     pruneTestResults(cwd, config);
   }
 
-  for (const scenario of selected) {
+  for (const [i, scenario] of selected.entries()) {
+    onProgress?.({
+      index: i + 1,
+      total: selected.length,
+      scenario,
+      passed: checks.filter((c) => c.status === "pass").length,
+      failed: checks.filter((c) => c.status === "fail").length,
+    });
     const absPath = resolveTestPath(cwd, scenario.testFile);
     if (!fs.existsSync(absPath)) {
       missingFiles.push(scenario.testFile);
@@ -267,7 +292,8 @@ export async function runScenarios(
         kind: scenario.kind,
         status: "fail",
         output: "",
-        reason: "test file missing — create it and implement the flow",
+        reason:
+          "test file missing — create it and implement the flow (renamed or removed it? call define_scenarios with the current list)",
       });
       continue;
     }
@@ -340,6 +366,7 @@ export async function runScenarios(
 
   const ran = checks.some((c) => c.status === "pass" || c.status === "fail");
 
+  const canvasProject = hasWeb && detectStacks(cwd).stacks.includes("flutter");
   const weakSpecWarnings =
     config.failOnWeakSpec !== false
       ? checks.flatMap((c) => {
@@ -348,7 +375,7 @@ export async function runScenarios(
           if (!fs.existsSync(abs)) return [];
           try {
             const text = fs.readFileSync(abs, "utf8");
-            return scanSpecFileContent(c.testFile.replace(/\\/g, "/"), text);
+            return scanSpecFileContent(c.testFile.replace(/\\/g, "/"), text, { canvasProject });
           } catch {
             return [];
           }
@@ -394,8 +421,7 @@ export function formatReport(result: ScenariosRunResult, scenarios: ScenarioDefi
     const suffix = c.reason ? ` (${c.reason})` : "";
     lines.push(`[${icon}] ${c.scenarioId}: ${c.title} — ${c.testFile}${suffix}`);
     if (c.status === "fail" && c.output) {
-      const trimmed = c.output.length > 4000 ? `${c.output.slice(0, 4000)}\n…(truncated)` : c.output;
-      lines.push(trimmed);
+      lines.push(clipMiddle(c.output, 4000));
     }
     if (c.status === "fail" && c.screenshots?.length) {
       lines.push(`  screenshots: ${c.screenshots.length} captured (attached when visionOnFailure is on)`);

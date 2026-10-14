@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ensureAgentsMd } from "../shared/agents-md";
+import { reportConfigErrors } from "../shared/json-config";
 
 const AUTO_SCAFFOLD_REASONS = new Set(["startup", "new"]);
 
@@ -13,6 +14,7 @@ function formatAgentsInject(agentsPath: string, content: string): string {
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (event, ctx) => {
+    reportConfigErrors(ctx);
     if (!AUTO_SCAFFOLD_REASONS.has(event.reason)) return;
 
     const result = ensureAgentsMd(ctx.cwd);
@@ -27,7 +29,10 @@ export default function (pi: ExtensionAPI) {
 
   // session_start cannot call ctx.reload() — only ExtensionCommandContext has it.
   // Inject the new file on the first agent turn instead.
-  pi.on("before_agent_start", async (event) => {
+  pi.on("before_agent_start", async (event, ctx) => {
+    // Every foundation extension reads its JSON config through shared/json-config;
+    // broken files are collected there and shown once, from here.
+    reportConfigErrors(ctx);
     if (!pendingAgentsInject) return;
 
     const agentsPath = pendingAgentsInject;

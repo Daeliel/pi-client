@@ -76,6 +76,30 @@ export function mergeScenarioLists(
   return [...byFile.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
+/** Key for comparing spec paths across relative/absolute and slash/case spellings. */
+export function specPathKey(cwd: string, testFile: string): string {
+  return path.resolve(cwd, testFile).replace(/\\/g, "/").toLowerCase();
+}
+
+/**
+ * Split registered scenarios into those to keep and those whose spec file was on disk
+ * earlier (`seen`) but is gone now — renamed or deleted. A file that was never seen is
+ * kept: defining a scenario before writing its test is the normal order.
+ */
+export function splitVanishedScenarios(
+  cwd: string,
+  registered: ScenarioDefinition[],
+  seen: ReadonlySet<string>,
+): { kept: ScenarioDefinition[]; vanished: ScenarioDefinition[] } {
+  const kept: ScenarioDefinition[] = [];
+  const vanished: ScenarioDefinition[] = [];
+  for (const s of registered) {
+    const gone = !fs.existsSync(path.resolve(cwd, s.testFile)) && seen.has(specPathKey(cwd, s.testFile));
+    (gone ? vanished : kept).push(s);
+  }
+  return { kept, vanished };
+}
+
 export function resolveEffectiveScenarios(
   cwd: string,
   registered: ScenarioDefinition[],

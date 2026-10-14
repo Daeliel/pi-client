@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, foundationConfigPaths } from "../shared/config-paths";
+import { readJsonConfig } from "../shared/json-config";
 
 /** Concrete polish levels, weakest to strongest. */
 export type PolishLevel = "off" | "basic" | "standard" | "showcase" | "ultimate";
@@ -73,12 +74,7 @@ export const DEFAULT_CONFIG: PolishConfig = {
 type RawConfig = Partial<Omit<PolishConfig, "passes">> & { passes?: Partial<Record<PolishLevel, number>> };
 
 function readJson(file: string): RawConfig | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return null;
-  }
+  return readJsonConfig<RawConfig>(file) as RawConfig | null;
 }
 
 /** Layer defaults < ~/.pi/polish.config.json < <cwd>/.pi/polish.config.json < <cwd>/polish.config.json. */

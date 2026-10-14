@@ -1,7 +1,12 @@
 /**
- * Ensures only one foundation gate sends a follow-up per agent turn.
- * Extensions call resetGateClaim() on before_agent_start, then tryClaimGate()
- * on agent_end when they need to block finish. Later gates skip if claimed.
+ * Ensures only one foundation gate sends a follow-up per agent run.
+ * Extensions call resetGateClaim() on agent_start (see registerGateReset), then
+ * tryClaimGate() on agent_end when they need to block finish. Later gates skip if claimed.
+ *
+ * Why agent_start and not before_agent_start: a gate's follow-up is queued from
+ * agent_end and runs as agent.continue() — a new low-level run that fires agent_start
+ * but NOT before_agent_start. Resetting only on before_agent_start left the claim set
+ * for the whole chain, so after the first fix follow-up no gate ever fired again.
  *
  * Expected package.json order: verify → scenarios → browser-console → polish.
  * "polish" only claims when nothing else did (all gates green), so it is always last.
@@ -27,7 +32,7 @@ function state(): GateState {
   return g[STATE_KEY];
 }
 
-/** Call from every foundation extension's before_agent_start. */
+/** Reset the claim for a new run. Safe to call more than once per run. */
 export function resetGateClaim(): void {
   const s = state();
   s.claimedLane = null;
@@ -58,4 +63,15 @@ export function getClaimedGate(): GateLane | null {
 /** Current turn serial (increments on each reset). */
 export function getGateTurnSerial(): number {
   return state().turnSerial;
+}
+
+/**
+ * Re-arm the single follow-up slot at the start of every low-level run, including
+ * the continuation runs that deliver gate follow-ups. Call once from each gate
+ * extension's factory; repeated resets within one run are harmless.
+ */
+export function registerGateReset(pi: { on(event: "agent_start", handler: () => void): void }): void {
+  pi.on("agent_start", () => {
+    resetGateClaim();
+  });
 }

@@ -155,16 +155,26 @@ const GHOST_HERMES =
   /<tool_call>\s*<function=([A-Za-z0-9_.-]+)>/i;
 const GHOST_JSON_NAME =
   /<tool_call>\s*\{[\s\S]*?"name"\s*:\s*"([A-Za-z0-9_.-]+)"/i;
+/** Other wrappers small models emit as plain text: <function_call>, Mistral [TOOL_CALLS], <|tool_call|>. */
+const GHOST_WRAPPED =
+  /(?:<function_call>|\[TOOL_CALLS\]|<\|tool_call\|>)\s*\[?\s*\{[\s\S]*?"name"\s*:\s*"([A-Za-z0-9_.-]+)"/i;
+/** A bare JSON call object: {"name": "read", "arguments": {...}} (also "parameters"). */
+const GHOST_BARE_JSON =
+  /\{\s*"name"\s*:\s*"([A-Za-z0-9_.-]+)"\s*,\s*"(?:arguments|parameters)"\s*:/gi;
 
 export interface GhostToolInfo {
   toolName: string;
 }
 
 /**
- * Model wrote XML/JSON tool syntax in thinking/text but emitted no native toolCall.
- * Pi only executes OpenAI tool_calls — these "ghost" calls never run.
+ * Model wrote tool syntax in thinking/text but emitted no native toolCall.
+ * Pi only executes native tool calls — these "ghost" calls never run.
+ *
+ * Wrapped syntax (<tool_call>, <function_call>, [TOOL_CALLS]) is unambiguous. A bare
+ * JSON object is only treated as a call when it names a tool that really exists
+ * (`knownTools`), so JSON the model shows as an example is not flagged.
  */
-export function findGhostToolCall(message: unknown): GhostToolInfo | null {
+export function findGhostToolCall(message: unknown, knownTools?: Iterable<string>): GhostToolInfo | null {
   const stop = extractStopInfo(message);
   if (stop.stopReason === "toolUse") return null;
   if (hasToolCallBlock(message)) return null;
@@ -172,11 +182,18 @@ export function findGhostToolCall(message: unknown): GhostToolInfo | null {
   const blob = [extractAssistantThinking(message), extractAssistantText(message)]
     .filter(Boolean)
     .join("\n");
-  if (!blob.includes("<tool_call>")) return null;
+  if (!blob) return null;
 
-  const match = blob.match(GHOST_HERMES) ?? blob.match(GHOST_JSON_NAME);
-  if (!match?.[1]) return null;
-  return { toolName: match[1] };
+  const wrapped = blob.match(GHOST_HERMES) ?? blob.match(GHOST_JSON_NAME) ?? blob.match(GHOST_WRAPPED);
+  if (wrapped?.[1]) return { toolName: wrapped[1] };
+
+  if (knownTools) {
+    const known = new Set(knownTools);
+    for (const m of blob.matchAll(GHOST_BARE_JSON)) {
+      if (m[1] && known.has(m[1])) return { toolName: m[1] };
+    }
+  }
+  return null;
 }
 
 export const REPEAT_STEER = `ANTI-LOOP: You already ran that exact tool call. Do NOT repeat it.
@@ -194,6 +211,7 @@ export const TRUNCATION_STEER = `ANTI-LOOP: Your previous response was cut off (
 Continue from where you stopped:
 - One short plan line
 - One tool call only
+- Writing a large file? Write the first part with write, then add the rest with edit in smaller pieces. Do not resend the whole file.
 - Do not restate the whole investigation
 - Do not dump long reasoning`;
 

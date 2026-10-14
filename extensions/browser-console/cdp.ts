@@ -467,12 +467,20 @@ export class CdpBrowser {
     };
   }
 
+  /**
+   * Clear the buffers, reload, and wait — so what is buffered afterwards comes from the
+   * current code only. Reloading without clearing kept errors the model had already
+   * fixed, which made every later check report a bug that no longer existed.
+   */
+  async reloadFresh(waitMs: number, signal?: AbortSignal): Promise<void> {
+    this.clearBuffer();
+    await this.reload(true);
+    if (waitMs > 0) await sleep(waitMs, signal);
+  }
+
   async checkAfterEdit(config: BrowserConsoleConfig, signal?: AbortSignal): Promise<ConsoleEntry[]> {
     if (!this.connected) return [];
-    if (config.autoReloadOnEdit) {
-      await this.reload(true);
-      await sleep(config.reloadWaitMs, signal);
-    }
+    if (config.autoReloadOnEdit) await this.reloadFresh(config.reloadWaitMs, signal);
     return this.getBuffered(config.includeWarnings);
   }
 

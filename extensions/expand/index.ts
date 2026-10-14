@@ -30,11 +30,14 @@ import {
   parseFitReply,
 } from "./procedure";
 import { runCriticCompletion } from "../polish/critic";
-import { isGateClaimed, resetGateClaim, tryClaimGate } from "../shared/gate-orchestrator";
+import { isGateClaimed, resetGateClaim, tryClaimGate, registerGateReset } from "../shared/gate-orchestrator";
+import { syncOwnedTools } from "../shared/tool-activation";
+
+const TOOLS = ["expand_map", "expand_propose", "expand_fit"];
+import { extractEditPath, isEditTool } from "../shared/edit-tools";
 import { registerOnceModifier } from "../shared/once";
 import { withGateWorkingMessage } from "../shared/working-status";
 
-const EDIT_TOOLS = new Set(["write", "edit", "create", "multiedit", "apply_patch", "str_replace"]);
 const WIDGET_KEY = "expand";
 const MAX_CRITIC_FILE_CHARS = 20_000;
 const MAX_CRITIC_TOTAL_CHARS = 60_000;
@@ -52,16 +55,6 @@ interface TaskState {
   editSerialAtFit: number;
   changedFiles: Set<string>;
   warned: Set<string>;
-}
-
-function extractPath(input: unknown): string | null {
-  if (!input || typeof input !== "object") return null;
-  const obj = input as Record<string, unknown>;
-  for (const key of ["path", "file_path", "filePath", "filename", "file"]) {
-    const v = obj[key];
-    if (typeof v === "string" && v.length > 0) return v;
-  }
-  return null;
 }
 
 function firstLine(s: string | undefined): string {
@@ -92,6 +85,7 @@ function splitAxesAndFocus(words: string[]): { axes: ExpandAxis[]; focus: string
 }
 
 export default function (pi: ExtensionAPI) {
+  registerGateReset(pi);
   let configCache: ExpandConfig | null = null;
   let ledger: Ledger = emptyLedger();
   let task: TaskState = idleTask();
@@ -200,8 +194,12 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("input", async (event) => {
+  pi.on("input", async (event, ctx) => {
     if (event.source !== "extension") resetOnNextStart = true;
+    // Expand tools exist only while an expand task is armed or running; a plain user
+    // prompt ends the task (before_agent_start resets it), so they go away with it.
+    const active = taskArmed || (!resetOnNextStart && task.mode !== "idle");
+    syncOwnedTools(pi, TOOLS, cfg(ctx).enabled && active ? TOOLS : []);
     return { action: "continue" as const };
   });
 
@@ -237,8 +235,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_result", async (event, _ctx) => {
-    if (!EDIT_TOOLS.has(event.toolName) || event.isError) return;
-    const p = extractPath(event.input);
+    if (!isEditTool(event.toolName) || event.isError) return;
+    const p = extractEditPath(event.input);
     if (!p) return;
     editSerial += 1;
     if (task.mode === "build") task.changedFiles.add(p);

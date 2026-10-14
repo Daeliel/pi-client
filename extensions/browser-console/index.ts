@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadConfig, type BrowserConsoleConfig } from "./config";
-import { CdpBrowser, isWebFile, formatReportForConfig, formatNetworkReport, formatStatus, isFailureEntry, sleep } from "./cdp";
+import { CdpBrowser, isWebFile, formatReportForConfig, formatNetworkReport, formatStatus, isFailureEntry } from "./cdp";
 import { ensureDebugBrowserRunning, isCdpConnectionError } from "./launch";
 import { BROWSER_CORE } from "./procedure";
 import type { ConsoleEntry } from "./types";
@@ -13,26 +13,37 @@ import { loadConfig as loadScenariosConfig } from "../scenarios/config";
 import { buildPlaywrightConfigTemplate } from "../scenarios/templates";
 import { capturePageScreenshot, loadVisionImages } from "../scenarios/vision";
 import { presentVisionToSession } from "../shared/vision-relay";
-import { resetGateClaim, tryClaimGate, isGateClaimed } from "../shared/gate-orchestrator";
+import { resetGateClaim, tryClaimGate, isGateClaimed, registerGateReset } from "../shared/gate-orchestrator";
+import { extractEditPath, isEditTool } from "../shared/edit-tools";
 import { detectStacks, shouldInjectWebProcedure } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
+import { syncOwnedTools } from "../shared/tool-activation";
+import { attemptNotes, giveUpNote, RepeatTracker } from "../shared/gate-messages";
 
-const EDIT_TOOLS = new Set(["write", "edit", "create", "multiedit", "apply_patch", "str_replace"]);
+const TOOLS = [
+  "browser_connect",
+  "browser_list_pages",
+  "browser_status",
+  "browser_console",
+  "browser_errors",
+  "browser_screenshot",
+  "browser_navigate",
+  "browser_reload",
+  "browser_network_errors",
+  "browser_disconnect",
+];
+/**
+ * What the model gets in a web project. Connection management and raw console dumps
+ * stay on /browser for the user: the tools auto-connect, and browser_errors already
+ * reports what matters.
+ */
+const MODEL_TOOLS = ["browser_errors", "browser_network_errors", "browser_reload", "browser_navigate", "browser_screenshot"];
+
 const STATE_TYPE = "foundation-browser-console-state";
 
 interface PersistedState {
   changedWebFiles?: string[];
   fixAttempts?: number;
-}
-
-function extractPath(input: unknown): string | null {
-  if (!input || typeof input !== "object") return null;
-  const obj = input as Record<string, unknown>;
-  for (const key of ["path", "file_path", "filePath", "filename", "file"]) {
-    const v = obj[key];
-    if (typeof v === "string" && v.length > 0) return v;
-  }
-  return null;
 }
 
 function failureEntries(browser: CdpBrowser, config: BrowserConsoleConfig): ConsoleEntry[] {
@@ -49,9 +60,11 @@ function ensureMinimalPlaywrightConfig(cwd: string): void {
 }
 
 export default function (pi: ExtensionAPI) {
+  registerGateReset(pi);
   const browser = new CdpBrowser();
   const changedWebFiles = new Set<string>();
   let fixAttempts = 0;
+  const repeats = new RepeatTracker();
   let configCache: BrowserConsoleConfig | null = null;
 
   function cfg(ctx: ExtensionContext): BrowserConsoleConfig {
@@ -140,6 +153,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
+    syncTools(ctx);
     const config = cfg(ctx);
     if (!config.enabled) return;
 
@@ -153,6 +167,17 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  function syncTools(ctx: ExtensionContext) {
+    const config = cfg(ctx);
+    const web = config.enabled && shouldInjectWebProcedure(ctx.cwd, changedWebFiles);
+    syncOwnedTools(pi, TOOLS, web ? MODEL_TOOLS : []);
+  }
+
+  pi.on("input", async (_event, ctx) => {
+    configCache = null;
+    syncTools(ctx);
+  });
+
   pi.on("session_shutdown", async () => {
     await browser.disconnect();
   });
@@ -161,6 +186,7 @@ export default function (pi: ExtensionAPI) {
     resetGateClaim();
     configCache = null;
     fixAttempts = 0;
+    repeats.reset();
     const config = cfg(ctx);
     if (!config.blocking) {
       changedWebFiles.clear();
@@ -176,9 +202,9 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_result", async (event, ctx) => {
     const config = cfg(ctx);
-    if (!config.enabled || !config.checkOnEdit || !EDIT_TOOLS.has(event.toolName)) return;
+    if (!config.enabled || !config.checkOnEdit || !isEditTool(event.toolName)) return;
 
-    const p = extractPath(event.input);
+    const p = extractEditPath(event.input);
     if (!p || !isWebFile(p)) return;
 
     if (!changedWebFiles.has(p)) {
@@ -196,9 +222,13 @@ export default function (pi: ExtensionAPI) {
     try {
       const issues = await browser.checkAfterEdit(config, ctx.signal);
       if (issues.length === 0) return;
-      const report = formatReportForConfig(issues, `[browser console] Issues after editing ${p}:`, config);
+      // Not isError: the edit applied; the page just has console errors now.
+      const report = formatReportForConfig(
+        issues,
+        `[browser console] The edit to ${p} was applied. The page now logs these errors — fix them next:`,
+        config,
+      );
       return {
-        isError: true,
         content: [...event.content, { type: "text", text: `\n\n${report}` }],
       };
     } catch (e) {
@@ -221,12 +251,20 @@ export default function (pi: ExtensionAPI) {
         if (!browser.connected) return;
       }
 
-      const issues = failureEntries(browser, config);
+      // Judge the code as it is now: fresh reload with an empty buffer. Errors logged
+      // earlier in the turn may already be fixed.
+      try {
+        await browser.reloadFresh(config.reloadWaitMs, ctx.signal);
+      } catch {
+        return; // tab gone / reload failed — cannot judge, do not block on stale data
+      }
       if (ctx.signal?.aborted) return;
+      const issues = failureEntries(browser, config);
 
       if (issues.length === 0) {
         changedWebFiles.clear();
         fixAttempts = 0;
+        repeats.reset();
         persist();
         return;
       }
@@ -236,6 +274,15 @@ export default function (pi: ExtensionAPI) {
           `Browser console still has errors after ${config.maxFixAttempts} attempts — stopping the fix loop. Run /browser errors`,
           "error",
         );
+        pi.sendMessage(
+          {
+            customType: "foundation-gate",
+            content: giveUpNote("browser console", fixAttempts, issues[0]?.message ?? ""),
+            display: true,
+          },
+          { deliverAs: "nextTurn" },
+        );
+        repeats.reset();
         changedWebFiles.clear();
         fixAttempts = 0;
         persist();
@@ -246,9 +293,12 @@ export default function (pi: ExtensionAPI) {
 
       fixAttempts += 1;
       persist();
+      const signature = issues.map((i) => `${i.type} ${i.message}`).join("\n");
+      const notes = attemptNotes(fixAttempts, config.maxFixAttempts, repeats.repeated(signature));
       const report = formatReportForConfig(
         issues,
-        `Browser console errors remain (attempt ${fixAttempts}/${config.maxFixAttempts}). Fix before finishing:`,
+        `Browser console errors remain (attempt ${fixAttempts}/${config.maxFixAttempts}). Fix before finishing:` +
+          (notes ? `\n${notes}` : ""),
         config,
       );
       pi.sendUserMessage(report, { deliverAs: "followUp" });
@@ -337,8 +387,7 @@ export default function (pi: ExtensionAPI) {
       const config = cfg(ctx);
       if (!browser.connected) await requireConnection(ctx, config);
       if (params.reload) {
-        await browser.reload(true);
-        await browser.checkAfterEdit({ ...config, autoReloadOnEdit: false }, signal);
+        await browser.reloadFresh(config.reloadWaitMs, signal);
       }
       const level = params.level ?? "error";
       let entries = browser.getAllBuffered();
@@ -370,8 +419,7 @@ export default function (pi: ExtensionAPI) {
       const config = cfg(ctx);
       if (!browser.connected) await requireConnection(ctx, config);
       if (params.reload) {
-        await browser.reload(true);
-        await browser.checkAfterEdit({ ...config, autoReloadOnEdit: false }, signal);
+        await browser.reloadFresh(config.reloadWaitMs, signal);
       }
       const entries = browser.getBuffered(config.includeWarnings);
       const report = formatReportForConfig(entries, "Browser errors:", config);
@@ -520,9 +568,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, signal, _onUpdate, ctx) {
       const config = cfg(ctx);
       if (!browser.connected) await requireConnection(ctx, config);
-      await browser.reload(true);
-      const wait = params.waitMs ?? config.reloadWaitMs;
-      if (wait > 0) await sleep(wait, signal);
+      await browser.reloadFresh(params.waitMs ?? config.reloadWaitMs, signal);
       const issues = browser.getBuffered(config.includeWarnings);
       const suffix =
         issues.length > 0
@@ -551,9 +597,7 @@ export default function (pi: ExtensionAPI) {
       const config = cfg(ctx);
       if (!browser.connected) await requireConnection(ctx, config);
       if (params.reload) {
-        browser.clearBuffer();
-        await browser.reload(true);
-        await browser.checkAfterEdit({ ...config, autoReloadOnEdit: false }, signal);
+        await browser.reloadFresh(config.reloadWaitMs, signal);
       }
       const minStatus = params.minStatus ?? 400;
       const failures = browser.getNetworkFailures().filter(
@@ -661,8 +705,7 @@ export default function (pi: ExtensionAPI) {
             ctx.ui.notify("Not connected. Run /browser connect first.", "warning");
             return;
           }
-          await browser.reload(true);
-          await browser.checkAfterEdit(config, undefined);
+          await browser.reloadFresh(config.reloadWaitMs);
           const issues = browser.getBuffered(config.includeWarnings);
           ctx.ui.notify(
             issues.length ? formatReportForConfig(issues, "After reload:", config) : "Reloaded — no console errors.",

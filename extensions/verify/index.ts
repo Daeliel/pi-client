@@ -1,14 +1,14 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { loadConfig, type VerifyConfig } from "./config";
-import { verify, formatReport, toolchainStatus } from "./engine";
+import { allSkippedForMissingTools, verify, formatReport, toolchainStatus } from "./engine";
 import { OPERATING_PROCEDURE } from "./procedure";
-import { resetGateClaim, tryClaimGate } from "../shared/gate-orchestrator";
+import { resetGateClaim, tryClaimGate, registerGateReset } from "../shared/gate-orchestrator";
+import { extractEditPath, isEditTool } from "../shared/edit-tools";
 import { classifyVerifyFailure, formatClassifiedFailure } from "../shared/failure-classify";
 import { detectStacks, formatStackDoctorLines } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
-
-const EDIT_TOOLS = new Set(["write", "edit", "create", "multiedit", "apply_patch", "str_replace"]);
+import { attemptNotes, giveUpNote, RepeatTracker } from "../shared/gate-messages";
 
 /** Custom session-entry type used to persist verify state across /resume + reload. */
 const STATE_TYPE = "foundation-verify-state";
@@ -18,21 +18,13 @@ interface PersistedState {
   fixAttempts?: number;
 }
 
-/** Pull a file path out of an edit/write tool input, whatever the field is named. */
-function extractPath(input: unknown): string | null {
-  if (!input || typeof input !== "object") return null;
-  const obj = input as Record<string, unknown>;
-  for (const key of ["path", "file_path", "filePath", "filename", "file"]) {
-    const v = obj[key];
-    if (typeof v === "string" && v.length > 0) return v;
-  }
-  return null;
-}
-
 export default function (pi: ExtensionAPI) {
+  registerGateReset(pi);
+
   // Per-session state.
   const changedFiles = new Set<string>();
   let fixAttempts = 0;
+  const repeats = new RepeatTracker();
   let configCache: VerifyConfig | null = null;
 
   function cfg(ctx: ExtensionContext): VerifyConfig {
@@ -76,6 +68,7 @@ export default function (pi: ExtensionAPI) {
     resetGateClaim();
     configCache = null;
     fixAttempts = 0;
+    repeats.reset();
     // With the gate active, the gate clears changedFiles when checks pass, so we
     // keep them across prompts (an interrupted task stays tracked). Without a
     // gate nothing would ever clear them, so reset per prompt.
@@ -90,8 +83,8 @@ export default function (pi: ExtensionAPI) {
 
   // 2) Auto-verify (lint only) after each edit, returned inline as the edit's result.
   pi.on("tool_result", async (event, ctx) => {
-    if (!EDIT_TOOLS.has(event.toolName)) return;
-    const p = extractPath(event.input);
+    if (!isEditTool(event.toolName)) return;
+    const p = extractEditPath(event.input);
     if (p && !changedFiles.has(p)) {
       changedFiles.add(p);
       persist();
@@ -104,10 +97,13 @@ export default function (pi: ExtensionAPI) {
     const result = await verify(ctx.cwd, [p], config, ["lint"], ctx.signal);
     if (!result.failed) return;
 
+    // Not isError: the edit DID apply. Flagging the edit as failed makes small models
+    // redo the same edit (old text no longer matches → a real error → confusion).
     const report = formatReport(result);
-    const note = `\n\n[foundation verifier] Lint failed for ${p}. Fix before continuing:\n${report}`;
+    const note =
+      `\n\n[foundation verifier] The edit to ${p} was applied. Lint now reports problems in that file — ` +
+      `fix them next (do not repeat the edit you just made):\n${report}`;
     return {
-      isError: true,
       content: [...event.content, { type: "text", text: note }],
     };
   });
@@ -117,26 +113,38 @@ export default function (pi: ExtensionAPI) {
     const config = cfg(ctx);
     if (!config.blocking || changedFiles.size === 0) return;
 
-    await withGateWorkingMessage(ctx, "Verifying (lint/tests) — inference idle", async () => {
-      const result = await verify(ctx.cwd, [...changedFiles], config, undefined, ctx.signal);
+    await withGateWorkingMessage(ctx, "Verifying (lint/tests) — inference idle", async (status) => {
+      const result = await verify(ctx.cwd, [...changedFiles], config, undefined, ctx.signal, (label) =>
+        status.step(label),
+      );
       if (ctx.signal?.aborted) return; // user cancelled the turn — leave state intact
 
       if (!result.failed) {
         // Checks pass → these files are confirmed; stop tracking them.
         changedFiles.clear();
         fixAttempts = 0;
+        repeats.reset();
         persist();
         return;
       }
+
+      const report = formatReport(result);
+      const classified = classifyVerifyFailure(report);
 
       if (fixAttempts >= config.maxFixAttempts) {
         ctx.ui.notify(
           `Verification still failing after ${config.maxFixAttempts} attempts — stopping the fix loop. Run /verify to see details.`,
           "error",
         );
+        // The model's last reply may claim success; make sure its next turn knows otherwise.
+        pi.sendMessage(
+          { customType: "foundation-gate", content: giveUpNote("verify", fixAttempts, classified.evidence), display: true },
+          { deliverAs: "nextTurn" },
+        );
         // Give up cleanly so the failure doesn't re-fire on every later turn.
         changedFiles.clear();
         fixAttempts = 0;
+        repeats.reset();
         persist();
         return;
       }
@@ -145,12 +153,12 @@ export default function (pi: ExtensionAPI) {
 
       fixAttempts += 1;
       persist();
-      const report = formatReport(result);
-      const classified = classifyVerifyFailure(report);
+      const notes = attemptNotes(fixAttempts, config.maxFixAttempts, repeats.repeated(report));
       const message = formatClassifiedFailure(
         classified,
         `Verification failed (attempt ${fixAttempts}/${config.maxFixAttempts}). ` +
-          `You must fix these before finishing — do not stop while checks fail.`,
+          `You must fix these before finishing — do not stop while checks fail.` +
+          (notes ? `\n${notes}` : ""),
       );
       // Re-trigger a fix turn. sendUserMessage always triggers a turn; deliverAs
       // "followUp" delivers it once the agent has settled (the agent_end moment).
@@ -179,8 +187,7 @@ export default function (pi: ExtensionAPI) {
       const files = params.scope === "project" ? [] : [...changedFiles];
       const result = await verify(ctx.cwd, files, config, undefined, signal);
       const report = formatReport(result);
-      const allSkipped =
-        result.checks.length > 0 && result.checks.every((c) => c.status === "skip") && files.length > 0;
+      const allSkipped = files.length > 0 && allSkippedForMissingTools(result);
       return {
         content: [{ type: "text", text: report }],
         details: { failed: result.failed, ran: result.ran, allSkipped },

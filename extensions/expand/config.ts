@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, foundationConfigPaths } from "../shared/config-paths";
+import { readJsonConfig } from "../shared/json-config";
 
 /** Directions an idea can take the project. Also the /once modifiers. */
 export type ExpandAxis = "more" | "deeper" | "wider" | "tension";
@@ -44,12 +45,7 @@ export const DEFAULT_CONFIG: ExpandConfig = {
 };
 
 function readJson(file: string): Partial<ExpandConfig> | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return null;
-  }
+  return readJsonConfig<ExpandConfig>(file);
 }
 
 function clampInt(v: unknown, fallback: number, min: number, max: number): number {

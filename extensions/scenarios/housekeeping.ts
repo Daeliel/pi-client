@@ -8,6 +8,8 @@ export const HOUSEKEEP_MANIFEST = ".housekeep.json";
 export interface HousekeepManifest {
   /** group key → canonical testFile (posix path under project). */
   canonicalByGroup?: Record<string, string>;
+  /** Spec files (posix, lowercase) present at the last model review — auto-review waits for new ones. */
+  lastReviewedSpecs?: string[];
 }
 
 export interface DuplicateGroup {
@@ -39,9 +41,25 @@ export function scenarioFilename(testFile: string): string {
   return path.basename(testFile.replace(/\\/g, "/"));
 }
 
+/** Trailing id words a model adds when it rewrites a spec instead of editing it. */
+const COPY_SUFFIX =
+  /^(v\d+|new|old|copy|fix|fixed|final|retry|again|alt|tmp|temp|draft|wip|orig|original|updated|backup|bak)$/;
+
+/**
+ * Group key for an id: the id minus copy-style suffixes, so `login`, `login-v2` and
+ * `login-fixed` share one key while `room-layout` and `room-type-cycling` do not.
+ * Numbers alone are kept — `level-1` and `level-2` are different flows.
+ */
 export function groupKeyForId(id: string): string {
-  const token = id.split("-")[0]?.trim().toLowerCase();
-  return token || id.toLowerCase();
+  const tokens = id.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  while (tokens.length > 1 && COPY_SUFFIX.test(tokens[tokens.length - 1]!)) tokens.pop();
+  return tokens.join("-") || id.toLowerCase();
+}
+
+/** Spec title for duplicate matching; empty when it is only the discovery fallback. */
+function titleKey(title: string): string {
+  const t = title.trim().toLowerCase().replace(/\s+/g, " ");
+  return t.startsWith("discovered:") ? "" : t;
 }
 
 export function manifestPath(cwd: string, config: ScenariosConfig): string {
@@ -73,13 +91,34 @@ export function buildDuplicateGroups(
   discovered: ScenarioDefinition[],
   manifest: HousekeepManifest,
 ): { groups: DuplicateGroup[]; solo: ScenarioDefinition[] } {
-  const byKey = new Map<string, ScenarioDefinition[]>();
-  for (const s of discovered) {
-    if (isScratchSpecFile(scenarioFilename(s.testFile))) continue;
-    const key = groupKeyForId(s.id);
-    const list = byKey.get(key) ?? [];
+  // Union specs that share an id key or an exact test title; a group is named by its
+  // alphabetically first id key (what /scenarios pick takes).
+  const candidates = discovered.filter((s) => !isScratchSpecFile(scenarioFilename(s.testFile)));
+  const parent = candidates.map((_, i) => i);
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i]!)));
+  const union = (a: number, b: number) => {
+    parent[find(a)] = find(b);
+  };
+  const firstByKey = new Map<string, number>();
+  candidates.forEach((s, i) => {
+    for (const k of [`id:${groupKeyForId(s.id)}`, `title:${titleKey(s.title)}`]) {
+      if (k === "title:") continue;
+      const first = firstByKey.get(k);
+      if (first === undefined) firstByKey.set(k, i);
+      else union(i, first);
+    }
+  });
+
+  const byRoot = new Map<number, ScenarioDefinition[]>();
+  candidates.forEach((s, i) => {
+    const list = byRoot.get(find(i)) ?? [];
     list.push(s);
-    byKey.set(key, list);
+    byRoot.set(find(i), list);
+  });
+  const byKey = new Map<string, ScenarioDefinition[]>();
+  for (const members of byRoot.values()) {
+    const key = members.map((m) => groupKeyForId(m.id)).sort()[0]!;
+    byKey.set(key, members);
   }
 
   const groups: DuplicateGroup[] = [];
@@ -202,6 +241,26 @@ export function deleteScratchFiles(cwd: string, discovered: ScenarioDefinition[]
   return { deleted, skipped: [] };
 }
 
+/** Delete chosen spec files and forget canonical picks that pointed at them. */
+export function deleteSpecFiles(cwd: string, config: ScenariosConfig, files: string[]): string[] {
+  const deleted: string[] = [];
+  for (const f of files) {
+    const abs = path.resolve(cwd, f);
+    if (!fs.existsSync(abs)) continue;
+    fs.unlinkSync(abs);
+    deleted.push(f);
+  }
+  const manifest = loadHousekeepManifest(cwd, config);
+  const gone = new Set(deleted.map(normalizeFile));
+  const picks = manifest.canonicalByGroup ?? {};
+  const stale = Object.keys(picks).filter((k) => gone.has(normalizeFile(picks[k]!)));
+  if (stale.length > 0) {
+    for (const k of stale) delete picks[k];
+    saveHousekeepManifest(cwd, config, manifest);
+  }
+  return deleted;
+}
+
 export function applyCanonicalDeletions(
   cwd: string,
   config: ScenariosConfig,
@@ -240,7 +299,7 @@ export function formatTidyReport(audit: ScenarioAudit): string {
   ];
 
   if (audit.scratch.length > 0) {
-    lines.push("SCRATCH (skipped from auto-run; safe to delete):");
+    lines.push("SCRATCH (skipped from auto-run; deleted automatically when the gate passes unless autoDeleteScratch is off):");
     for (const s of audit.scratch) {
       lines.push(`  - ${s.testFile}`);
     }

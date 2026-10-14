@@ -16,7 +16,9 @@
     "enabled": true,
     "maxSpecsBeforeAudit": 10,
     "auditOnAgentEnd": true,
-    "skipScratchInAutoRun": true
+    "skipScratchInAutoRun": true,
+    "autoDeleteScratch": true,
+    "modelReview": false
   },
   "maxScreenshotsPerRun": 4,
   "maxImageWidth": 1280,
