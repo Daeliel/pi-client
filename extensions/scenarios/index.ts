@@ -3,12 +3,15 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "typebox";
 import {
+  isScenarioLevel,
   loadConfig,
   persistMaxSpecsBeforeAudit,
   persistQaShotEnabled,
   persistQaShotMode,
+  persistScenarioLevel,
   type ScenariosConfig,
 } from "./config";
+import { formatStandardNote, pickStandard } from "./select";
 import {
   ensureScenariosDir,
   ensurePlaywrightProjectDeps,
@@ -320,6 +323,7 @@ export default function (pi: ExtensionAPI) {
       includeWeb,
       includeFlutter,
       stackSummary: detection.summary,
+      level: config.level,
     });
 
     return {
@@ -394,6 +398,27 @@ export default function (pi: ExtensionAPI) {
     return resolveEffectiveScenarios(ctx.cwd, scenarios, cfg(ctx));
   }
 
+  /**
+   * The specs a run covers at this level: all of them for thorough (or when asked for all);
+   * for standard, this task's specs, the smoke specs and the ones the changed code belongs to.
+   * `note` says what ran and how to run the rest (empty for a full run).
+   */
+  function specsForLevel(
+    ctx: ExtensionContext,
+    toRun: ScenarioDefinition[],
+    all = false,
+  ): { run: ScenarioDefinition[]; note: string } {
+    if (all || cfg(ctx).level !== "standard") return { run: toRun, note: "" };
+    const focus = [...scenarios.map((s) => s.testFile), ...specsCreatedThisSession];
+    const pick = pickStandard(ctx.cwd, toRun, changedFiles, focus);
+    return { run: pick.run, note: formatStandardNote(pick) };
+  }
+
+  /** Thorough reviews passing specs' screenshots too; standard looks only when something fails. */
+  function passShotsWanted(config: ScenariosConfig): boolean {
+    return config.visionOnPass && config.level !== "standard";
+  }
+
   /** Prefix a run report with the reconcile note (once). */
   function withVanishedNote(report: string): string {
     const note = vanishedNote;
@@ -430,7 +455,7 @@ export default function (pi: ExtensionAPI) {
     introSuffix: string,
   ) {
     const failureShots = result.failed && config.visionOnFailure ? (result.screenshots ?? []) : [];
-    const passShots = !result.failed && config.visionOnPass ? (result.outputScreenshots ?? []) : [];
+    const passShots = !result.failed && passShotsWanted(config) ? (result.outputScreenshots ?? []) : [];
     const shots = [...failureShots, ...passShots];
     if (shots.length === 0) {
       return {
@@ -501,14 +526,15 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (toRun.length > 0) {
-        const result = await runScenarios(ctx.cwd, toRun, config, ctx.signal, undefined, (p) =>
+      const { run: picked, note: levelNote } = specsForLevel(ctx, toRun);
+      if (picked.length > 0) {
+        const result = await runScenarios(ctx.cwd, picked, config, ctx.signal, undefined, (p) =>
           status.step(formatScenarioProgress(p)),
         );
         if (ctx.signal?.aborted) return;
 
         if (result.failed) {
-          const report = withVanishedNote(formatReport(result, toRun));
+          const report = withVanishedNote(formatReport(result, picked)) + (levelNote ? `\n\n${levelNote}` : "");
           const classified = classifyScenarioFailure({
             report,
             preflightWarnings: result.preflightWarnings,
@@ -545,8 +571,9 @@ export default function (pi: ExtensionAPI) {
           await sendVisionFollowUp(ctx, intro, shots, config);
           return;
         }
-        recordRunResults(result, toRun);
+        recordRunResults(result, picked);
       }
+      if (levelNote && ctx.hasUI) ctx.ui.notify(levelNote, "info");
 
       if (shouldRunQaGate(config)) {
         if (qaFixAttempts >= config.maxFixAttempts) {
@@ -790,7 +817,13 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       ids: Type.Optional(
         Type.Array(Type.String(), {
-          description: "Run only these scenario ids. Omit to run all defined scenarios.",
+          description:
+            "Run only these scenario ids. Omit to run the level's selection (thorough: every spec; standard: this task's, smoke and affected specs).",
+        }),
+      ),
+      all: Type.Optional(
+        Type.Boolean({
+          description: "Standard level: run every spec, not only the affected ones — do this before calling a milestone done.",
         }),
       ),
     }),
@@ -820,12 +853,16 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
+      // Named ids run as asked; otherwise the level decides (standard: affected specs only).
+      const { run: picked, note: levelNote } = filterIds
+        ? { run: toRun, note: "" }
+        : specsForLevel(ctx, toRun, params.all === true);
       const progress = runProgress(ctx, "Running scenarios");
       let result: Awaited<ReturnType<typeof runScenarios>>;
       try {
         result = await runScenarios(
           ctx.cwd,
-          toRun,
+          picked,
           config,
           signal,
           filterIds ? new Set([...filterIds]) : undefined,
@@ -837,8 +874,8 @@ export default function (pi: ExtensionAPI) {
       } finally {
         progress.done();
       }
-      const report = withVanishedNote(formatReport(result, toRun));
-      recordRunResults(result, toRun);
+      const report = withVanishedNote(formatReport(result, picked)) + (levelNote ? `\n\n${levelNote}` : "");
+      recordRunResults(result, picked);
       if (result.failed) {
         const classified = classifyScenarioFailure({
           report,
@@ -1109,7 +1146,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("scenarios", {
     description:
-      "Acceptance scenarios — list | run | run-all | sync | tidy | review | cap | pick | clear | doctor | qa on|off|status|model|human|approve [project]",
+      "Acceptance scenarios — list | run | run-all | sync | level | tidy | review | cap | pick | clear | doctor | qa on|off|status|model|human|approve [project]",
     handler: async (args, ctx) => {
       const config = cfg(ctx);
       if (!config.enabled) {
@@ -1152,6 +1189,28 @@ export default function (pi: ExtensionAPI) {
         const file = persistMaxSpecsBeforeAudit(ctx.cwd, value);
         configCache = null;
         ctx.ui.notify(`Spec cap set to ${value} for this project (${total} on disk) — saved to ${file}.`, "info");
+        return;
+      }
+
+      if (sub === "level") {
+        const wanted = parts[1]?.toLowerCase();
+        if (!wanted) {
+          ctx.ui.notify(
+            `Scenario level: ${config.level}.\n` +
+              "  thorough — every spec on every code change, pass screenshots reviewed, edge cases asked for (default)\n" +
+              "  standard — this task's, smoke and affected specs; screenshots on failure; full run before a milestone\n" +
+              "/scenarios level thorough|standard [user] — saved for this project, or for every project with user.",
+            "info",
+          );
+          return;
+        }
+        if (!isScenarioLevel(wanted)) {
+          ctx.ui.notify("Use /scenarios level thorough or /scenarios level standard (add user to save it for every project).", "warning");
+          return;
+        }
+        const file = persistScenarioLevel(ctx.cwd, wanted, parts[2]?.toLowerCase() === "user" ? "user" : "project");
+        configCache = null;
+        ctx.ui.notify(`Scenario level: ${wanted} (saved to ${file}).`, "info");
         return;
       }
 
@@ -1342,7 +1401,7 @@ export default function (pi: ExtensionAPI) {
           const failureShots = config.visionOnFailure ? (result.screenshots ?? []) : [];
           await sendVisionFollowUp(ctx, `Acceptance scenarios failed. Fix these:\n\n${report}`, failureShots, config);
         } else {
-          const passShots = config.visionOnPass ? (result.outputScreenshots ?? []) : [];
+          const passShots = passShotsWanted(config) ? (result.outputScreenshots ?? []) : [];
           if (passShots.length > 0) {
             await sendVisionFollowUp(ctx, `All scenarios passed.\n\n${report}`, passShots, config);
           } else {
@@ -1378,7 +1437,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       ctx.ui.notify(
-        "Usage: /scenarios list | run | run-all | sync | tidy | review | cap | pick <group> <n> | clear | doctor | qa on|off|model|human|approve|status [project]",
+        "Usage: /scenarios list | run | run-all | sync | level [thorough|standard] [user] | tidy | review | cap | pick <group> <n> | clear | doctor | qa on|off|model|human|approve|status [project]",
         "info",
       );
     },

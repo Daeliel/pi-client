@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import antiLoopExt from "../extensions/anti-loop/index";
-import { call, createHarness, fauxAssistantMessage, reply } from "./harness";
+import { call, createHarness, fauxAssistantMessage, fauxText, fauxThinking, reply, seenBy } from "./harness";
 
 const truncated = (text = "Let me think about this very long plan") =>
   fauxAssistantMessage(text, { stopReason: "length" });
@@ -44,6 +44,28 @@ describe("anti-loop", () => {
     }
   });
 
+  it("aborts a thinking loop and the recovery steer reaches the model", async () => {
+    const h = await createHarness({ extensions: [antiLoopExt], files: { "a.js": "a" } });
+    try {
+      const loop = "I should try another port and restart the dev server again\n".repeat(6);
+      let after = "";
+      h.faux.setResponses([
+        fauxAssistantMessage([fauxThinking(loop), fauxText("trying")]),
+        (context) => {
+          after = JSON.stringify((seenBy(context).last as { content?: unknown } | undefined)?.content ?? "");
+          return reply("blocked: the port is taken");
+        },
+        reply("unused"),
+      ]);
+      await h.session.prompt("start the app");
+      await h.settle();
+      assert.match(after, /Your thinking is looping/, "the steer is delivered after the abort, not left queued");
+      assert.equal(h.faux.getPendingResponseCount(), 1);
+    } finally {
+      h.dispose();
+    }
+  });
+
   it("does not hard-stop when each recovery is followed by real progress", async () => {
     const h = await createHarness({ extensions: [antiLoopExt] });
     try {
@@ -76,7 +98,7 @@ describe("anti-loop user-help trigger", () => {
         },
         reply("done, and the button is blue"),
         (context) => {
-          nextSystem = context.systemPrompt ?? "";
+          nextSystem = seenBy(context).systemPrompt;
           return reply("next");
         },
       ]);
@@ -105,7 +127,7 @@ describe("anti-loop user-help trigger", () => {
           return call("read", { path: "b.js" });
         },
         (context) => {
-          jumpIn = JSON.stringify(context.messages.at(-1)?.content ?? "");
+          jumpIn = JSON.stringify((seenBy(context).last as { content?: unknown } | undefined)?.content ?? "");
           return reply("Which button did you click?");
         },
         reply("unused"),

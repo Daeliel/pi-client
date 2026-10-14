@@ -33,6 +33,18 @@ export interface QaShotConfig {
   urlPath: string;
 }
 
+/**
+ * How hard the scenarios gate works.
+ * thorough (default): every spec runs on every code change; passing specs' screenshots are reviewed.
+ * standard: smoke specs plus the specs this change touches; screenshots only on failure. A full
+ * run is still one call away (run_scenarios all, /scenarios run-all) before calling work done.
+ */
+export type ScenarioLevel = "thorough" | "standard";
+
+export function isScenarioLevel(value: unknown): value is ScenarioLevel {
+  return value === "thorough" || value === "standard";
+}
+
 export interface HousekeepingConfig {
   enabled: boolean;
   /** Notify / suggest tidy when count exceeds this. */
@@ -53,6 +65,8 @@ export interface HousekeepingConfig {
 export interface ScenariosConfig {
   /** Master switch — when false, hooks and tools stay idle. */
   enabled: boolean;
+  /** thorough | standard — see ScenarioLevel. */
+  level: ScenarioLevel;
   /** Block agent_end while scenarios are undefined, missing, or failing. */
   blocking: boolean;
   maxFixAttempts: number;
@@ -87,6 +101,7 @@ export interface ScenariosConfig {
 
 export const DEFAULT_CONFIG: ScenariosConfig = {
   enabled: true,
+  level: "thorough",
   blocking: true,
   maxFixAttempts: 5,
   timeoutMs: 180000,
@@ -192,6 +207,7 @@ export function loadConfig(cwd: string): ScenariosConfig {
       housekeeping: mergeHousekeeping(cfg.housekeeping, override.housekeeping),
     };
   }
+  if (!isScenarioLevel(cfg.level)) cfg.level = DEFAULT_CONFIG.level;
   return cfg;
 }
 
@@ -232,6 +248,15 @@ export function persistMaxSpecsBeforeAudit(cwd: string, max: number): string {
   const prev = (existing.housekeeping ?? {}) as Partial<HousekeepingConfig>;
   const toWrite = { ...existing, housekeeping: { ...prev, maxSpecsBeforeAudit: max } };
   fs.writeFileSync(target, `${JSON.stringify(toWrite, null, 2)}\n`, "utf8");
+  return target;
+}
+
+/** Save the gate level to the project (default) or user config. */
+export function persistScenarioLevel(cwd: string, level: ScenarioLevel, scope: QaShotPersistScope = "project"): string {
+  const target = scope === "user" ? userScenariosConfigPath() : projectScenariosConfigPath(cwd);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const existing = readJson(target) ?? {};
+  fs.writeFileSync(target, `${JSON.stringify({ ...existing, level }, null, 2)}\n`, "utf8");
   return target;
 }
 

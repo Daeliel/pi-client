@@ -123,11 +123,32 @@ export default function (pi: ExtensionAPI) {
     ctx.abort();
   }
 
+  /**
+   * A message to send once an aborted run has settled. Pi 1.x ends an aborted run without
+   * delivering what was queued during it (older Pi delivered it), so a steer or followUp
+   * sent next to ctx.abort() sat unsent until the user typed again. Sent as a fresh prompt,
+   * so before_agent_start runs and user-help reaches the system prompt.
+   */
+  let afterAbort: { text: string; epoch: number } | null = null;
+
+  function abortThenSend(ctx: ExtensionContext, text: string) {
+    afterAbort = { text, epoch: recoveryEpoch };
+    ctx.abort();
+  }
+
+  pi.on("agent_settled", async () => {
+    const next = afterAbort;
+    afterAbort = null;
+    if (!next || hardStopped || next.epoch !== recoveryEpoch) return;
+    pi.sendUserMessage(next.text);
+  });
+
   function tryRecover(
     ctx: ExtensionContext,
     config: AntiLoopConfig,
     message: string,
     kind?: RecoveryKind,
+    aborted = false,
   ): boolean {
     if (hardStopped) return false;
     if (recoveries >= config.maxRecoveries) {
@@ -149,7 +170,12 @@ export default function (pi: ExtensionAPI) {
       armUserHelp();
     }
     text = `${text}\n\n(recovery ${recoveries}/${config.maxRecoveries})`;
-    // Defer past any concurrent ctx.abort() queue-clear (thinking-loop / hard-stop).
+    if (aborted) {
+      // The run is being aborted: a followUp would be left in the queue (see afterAbort).
+      afterAbort = { text, epoch };
+      return true;
+    }
+    // Defer past any concurrent ctx.abort() queue-clear (hard stop).
     // Otherwise followUp can be cleared then re-queued and leave Working with no LLM call.
     queueMicrotask(() => {
       if (hardStopped || epoch !== recoveryEpoch) return;
@@ -186,10 +212,7 @@ export default function (pi: ExtensionAPI) {
     if (ctx.isIdle()) {
       pi.sendUserMessage(text);
     } else {
-      ctx.abort();
-      queueMicrotask(() => {
-        pi.sendUserMessage(text, { deliverAs: "followUp" });
-      });
+      abortThenSend(ctx, text);
     }
   }
 
@@ -227,13 +250,12 @@ export default function (pi: ExtensionAPI) {
 
     // User typed while the agent was working. Ordinary steering ("also make it blue")
     // goes through untouched. Only when this run is visibly thrashing does it become
-    // user-help: stop the stream and put the instruction on the user's own message —
-    // that message is answered in a continuation run, where before_agent_start (and so
-    // the system-prompt procedure) never fires.
+    // user-help: stop the stream and send the user's message, with the user-help note on
+    // it, as a fresh prompt once the aborted run settles.
     if (!ctx.isIdle() && runLooksStuck()) {
       armUserHelp();
-      ctx.abort();
-      return { action: "transform" as const, text: withUserHelpNote(event.text) };
+      abortThenSend(ctx, withUserHelpNote(event.text));
+      return { action: "handled" as const };
     }
   });
 
@@ -285,9 +307,9 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setWorkingMessage("Anti-loop: aborting thinking loop…");
     }
     // Abort first — otherwise the model keeps generating the cycle and burns the GPU.
-    // tryRecover's deferred followUp runs after TUI clears queues.
+    // The recovery steer goes out once the aborted run has settled.
     ctx.abort();
-    return tryRecover(ctx, config, THINKING_LOOP_STEER, "thinking");
+    return tryRecover(ctx, config, THINKING_LOOP_STEER, "thinking", true);
   }
 
   pi.on("tool_call", async (event, ctx) => {

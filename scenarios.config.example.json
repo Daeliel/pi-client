@@ -1,6 +1,8 @@
 {
   "_comment": "Copy to .pi/scenarios.config.json in a project (or ~/.pi/scenarios.config.json globally). Legacy <project>/scenarios.config.json still works. Playwright: run install-on-client.bat once on the client PC, then edit .pi/playwright.config.ts per app.",
   "enabled": true,
+  "_level": "thorough (default): every spec on every code change, pass screenshots reviewed. standard: this task's, smoke (@smoke) and affected specs (// @covers: header or file name); run_scenarios all:true for a full run. /scenarios level thorough|standard [user]",
+  "level": "thorough",
   "blocking": true,
   "maxFixAttempts": 5,
   "timeoutMs": 180000,

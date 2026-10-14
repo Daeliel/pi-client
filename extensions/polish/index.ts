@@ -304,9 +304,11 @@ export default function (pi: ExtensionAPI) {
     const isNewTask = newUserPrompt || task === null;
     newUserPrompt = false;
     if (isNewTask) {
-      task = resolveLevel(ctx, event.prompt);
-      task.vague = isVagueImprovePrompt(event.prompt);
-      task.mentioned = surfacesMentioned(inventory, event.prompt).map((s) => s.id);
+      // Pi 1.x also starts runs from an extension's custom message, which has no prompt text.
+      const prompt = event.messageType === "custom" ? "" : event.prompt;
+      task = resolveLevel(ctx, prompt);
+      task.vague = isVagueImprovePrompt(prompt);
+      task.mentioned = surfacesMentioned(inventory, prompt).map((s) => s.id);
       clearPassDisplay(ctx);
 
       if (task.source === "auto" && config.announceAuto) {

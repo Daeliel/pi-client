@@ -141,6 +141,90 @@ describe("scenarios gate", () => {
     }
   });
 
+  describe("levels", () => {
+    // Three specs on disk, run by node: one for the code the model edits, a smoke spec,
+    // and a failing spec for an area this change does not touch.
+    const specs = {
+      ".pi/scenarios/energy-charge.spec.ts": "process.exit(0);\n",
+      ".pi/scenarios/smoke-loop.spec.ts": "process.exit(0);\n",
+      ".pi/scenarios/travel-stage.spec.ts": "process.exit(1);\n",
+    };
+    const levelConfig = (level?: "standard") => ({
+      ...NODE_SCENARIOS_CONFIG,
+      ...(level ? { level } : {}),
+      maxFixAttempts: 1,
+      visionOnFailure: false,
+      web: { command: "node {files}", probe: "node --version" },
+    });
+    const lastToolText = (c: { messages?: unknown[] }) => JSON.stringify(c.messages?.at(-1) ?? "");
+
+    it("thorough (the default) runs every spec, so the unrelated failure blocks", async () => {
+      const h = await createHarness({ extensions: [scenariosExt], files: specs });
+      try {
+        writeProjectConfig(h.cwd, "scenarios.config.json", levelConfig());
+        h.faux.setResponses([call("write", { path: "src/energy.js", content: "x" }), reply("done"), reply("tried"), reply("unused")]);
+        await h.session.prompt("tweak energy");
+        const users = h.userMessages();
+        assert.equal(startsWith(users, "Acceptance scenarios failed"), 1, users.join("\n---\n"));
+        assert.match(users.find((m) => m.startsWith("Acceptance scenarios failed")) ?? "", /travel-stage/);
+      } finally {
+        h.dispose();
+      }
+    });
+
+    it("standard runs the affected and smoke specs, and says what it left out", async () => {
+      const notes: string[] = [];
+      const h = await createHarness({
+        extensions: [scenariosExt],
+        files: specs,
+        ui: { notify: ((message: string) => void notes.push(message)) as never },
+      });
+      try {
+        writeProjectConfig(h.cwd, "scenarios.config.json", levelConfig("standard"));
+        h.faux.setResponses([call("write", { path: "src/energy.js", content: "x" }), reply("done"), reply("unused")]);
+        await h.session.prompt("tweak energy");
+        assert.equal(startsWith(h.userMessages(), "Acceptance scenarios failed"), 0, "travel-stage is not this change's");
+        assert.equal(h.faux.getPendingResponseCount(), 1);
+        const note = notes.find((n) => n.startsWith("Standard level:")) ?? "";
+        assert.match(note, /ran 2 of 3 spec\(s\)/);
+        assert.match(note, /energy-charge \(name matches src\/energy\.js\)/);
+        assert.match(note, /smoke-loop \(smoke\)/);
+        assert.match(note, /all: true/);
+      } finally {
+        h.dispose();
+      }
+    });
+
+    it("standard: run_scenarios all: true runs everything and finds the failure", async () => {
+      const seen: string[] = [];
+      const h = await createHarness({ extensions: [scenariosExt], files: specs });
+      try {
+        writeProjectConfig(h.cwd, "scenarios.config.json", levelConfig("standard"));
+        h.faux.setResponses([
+          call("write", { path: "src/energy.js", content: "x" }),
+          call("run_scenarios", {}),
+          (c: { messages?: unknown[] }) => {
+            seen.push(lastToolText(c));
+            return call("run_scenarios", { all: true });
+          },
+          (c: { messages?: unknown[] }) => {
+            seen.push(lastToolText(c));
+            return reply("done");
+          },
+          reply("unused"),
+        ]);
+        await h.session.prompt("tweak energy");
+        assert.match(seen[0] ?? "", /Standard level: ran 2 of 3/, "without all, only the affected specs");
+        assert.doesNotMatch(seen[0] ?? "", /travel-stage[^"]*FAIL|FAIL[^"]*travel-stage/i);
+        assert.match(seen[1] ?? "", /travel-stage/);
+        assert.doesNotMatch(seen[1] ?? "", /Standard level:/, "a full run has no level note");
+        assert.match(seen[1] ?? "", /"isError":true|failed/i);
+      } finally {
+        h.dispose();
+      }
+    });
+  });
+
   describe("model housekeeping review", () => {
     const reviewConfig = (modelReview: boolean) => ({
       ...NODE_SCENARIOS_CONFIG,

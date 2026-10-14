@@ -13,15 +13,20 @@ import polish from "../extensions/polish/index";
 import expand from "../extensions/expand/index";
 import once from "../extensions/once/index";
 import visionRelay from "../extensions/vision-relay/index";
-import { createHarness, reply, writeProjectConfig } from "./harness";
+import { createHarness, reply, seenBy, writeProjectConfig } from "./harness";
 
 const h = await createHarness({
   extensions: [antiLoop, verify, scenarios, browser, projectContext, research, release, polish, expand, once, visionRelay],
   files: { "package.json": JSON.stringify({ scripts: { dev: "vite" } }), "index.html": "<html></html>" },
 });
 writeProjectConfig(h.cwd, "browser-console.config.json", { autoConnect: false, autoLaunchBrowser: false });
-let sys = ""; let tools: any[] = [];
-h.faux.setResponses([(c: any) => { sys = c.systemPrompt; tools = c.tools ?? []; return reply("ok"); }]);
+let sys = ""; let tools: { name: string }[] = [];
+h.faux.setResponses([(c: any) => {
+  const seen = seenBy(c);
+  sys = seen.systemPrompt;
+  tools = seen.tools.map((name) => ({ name }));
+  return reply("ok");
+}]);
 await h.session.prompt(process.argv[2] ?? "build a todo app page");
 const sections = sys.split(/\n(?=## )/);
 for (const sec of sections) console.log(String(sec.length).padStart(6), sec.split("\n")[0].slice(0, 70));

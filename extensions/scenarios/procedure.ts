@@ -1,5 +1,6 @@
 import { WEB_TOOLING_CORE, WEB_LANE_DETAILS, FLUTTER_LANE_DETAILS } from "../shared/web-tooling-guide";
 import type { StackDetection } from "../shared/stack-detect";
+import type { ScenarioLevel } from "./config";
 
 /**
  * Short acceptance-scenario core — always injected when scenarios are enabled.
@@ -17,15 +18,31 @@ Before treating a feature as done, prove it with runnable tests — not reasonin
 5. **[SKIP] is not a pass** — run /scenarios doctor.
 6. If a failure message has LABEL / EVIDENCE / RAW: do not trust LABEL alone — confirm against EVIDENCE and RAW.
 
-Housekeeping: extend existing specs before adding many new ones. \`/scenarios tidy\` when the folder grows.
+Where tests go:
+- **Rules** (numbers, formulas, state changes) → unit tests in the project's own test runner (the verify gate runs them). Specs prove what the user **sees and does**: input, screens, navigation, rendering — not a rule re-checked through the browser.
+- **One spec file per area** (energy.spec.ts, travel.spec.ts), many tests inside. Add to the matching file; a new file only for a new area. When behaviour changes, update its test — never add a second one beside it.
+- First line of each spec: \`// @covers: <source paths or globs it proves>\`.
+- Keep 3–5 **smoke** tests (title ends with @smoke) that play the core loop end to end.
+\`/scenarios tidy\` when the folder grows.
 `.trim();
+
+/** One paragraph per gate level, appended to the core. */
+export const LEVEL_TEXT: Record<ScenarioLevel, string> = {
+  thorough:
+    "Level: **thorough** — every spec runs on every code change. Cover edge cases: limits, zero/empty, repeats, wrong order. " +
+    "For a rule that must always hold, add a unit test that drives a random sequence of actions and checks it after every step.",
+  standard:
+    "Level: **standard** — the gate runs this task's specs, the smoke specs and the specs whose @covers (or file name) matches the changed files. " +
+    "A few edge cases per rule. Before calling a milestone done, run_scenarios with all: true.",
+};
 
 export function buildScenariosProcedure(opts: {
   includeWeb: boolean;
   includeFlutter: boolean;
   stackSummary?: string;
+  level?: ScenarioLevel;
 }): string {
-  const parts = [SCENARIOS_CORE];
+  const parts = [SCENARIOS_CORE, LEVEL_TEXT[opts.level ?? "thorough"]];
   if (opts.stackSummary) {
     parts.push(`## Detected project\n\n${opts.stackSummary}`);
   }

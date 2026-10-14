@@ -5,7 +5,7 @@ import * as path from "node:path";
 import expandExt from "../extensions/expand/index";
 import onceExt from "../extensions/once/index";
 import polishExt from "../extensions/polish/index";
-import { call, createHarness, reply, writeProjectConfig } from "./harness";
+import { call, createHarness, reply, seenBy, writeProjectConfig } from "./harness";
 
 function writeLedger(cwd: string) {
   const now = Date.now();
@@ -44,8 +44,8 @@ describe("expand build → fit check", () => {
     try {
       writeLedger(h.cwd);
       const tools: string[][] = [];
-      const track = (step: ReturnType<typeof call>) => (context: { tools?: { name: string }[] }) => {
-        tools.push((context.tools ?? []).map((t) => t.name));
+      const track = (step: ReturnType<typeof call>) => (context: Parameters<typeof seenBy>[0]) => {
+        tools.push(seenBy(context).tools);
         return step;
       };
       h.faux.setResponses([
@@ -66,7 +66,7 @@ describe("expand build → fit check", () => {
 
       // A plain prompt afterwards ends the expand task: its tools go away.
       let after: string[] = [];
-      h.faux.setResponses([(context) => ((after = (context.tools ?? []).map((t) => t.name)), reply("hi"))]);
+      h.faux.setResponses([(context) => ((after = seenBy(context).tools), reply("hi"))]);
       await h.session.prompt("what time is it");
       assert.ok(!after.includes("expand_fit"));
     } finally {
@@ -84,8 +84,8 @@ describe("/once", () => {
     try {
       writeProjectConfig(h.cwd, "polish.config.json", { level: "off", announceAuto: false });
       const systems: string[] = [];
-      const grab = (step: ReturnType<typeof reply>) => (context: { systemPrompt?: string }) => {
-        systems.push(context.systemPrompt ?? "");
+      const grab = (step: ReturnType<typeof reply>) => (context: Parameters<typeof seenBy>[0]) => {
+        systems.push(seenBy(context).systemPrompt);
         return step;
       };
       h.faux.setResponses([grab(reply("ok")), grab(reply("ok"))]);

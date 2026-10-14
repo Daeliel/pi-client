@@ -20,10 +20,35 @@ import {
   fauxText,
   fauxThinking,
   fauxToolCall,
+  getCurrentSystemPrompt,
+  getCurrentTools,
   type FauxResponseStep,
-} from "../node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js";
+  type JsonObject,
+} from "@earendil-works/pi-ai";
 
 export { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall };
+
+interface SeenContext {
+  messages?: readonly unknown[];
+  systemPrompt?: string;
+  tools?: readonly { name: string }[];
+}
+
+/**
+ * What the model is shown on a faux call: the system prompt, the active tool names, and the
+ * last message that is not a system message. Pi 1.x sends the prompt and tools as system
+ * messages in the transcript (toolsAdded/toolsRemoved), not as context.systemPrompt/tools;
+ * the old fields are still read when present.
+ */
+export function seenBy(context: SeenContext): { systemPrompt: string; tools: string[]; last: unknown } {
+  const messages = (context.messages ?? []) as never;
+  const lastTurn = [...(context.messages ?? [])].reverse().find((m) => (m as { role?: string }).role !== "system");
+  return {
+    systemPrompt: context.systemPrompt ?? getCurrentSystemPrompt(messages),
+    tools: (context.tools ?? getCurrentTools(messages)).map((t) => t.name),
+    last: lastTurn,
+  };
+}
 export type { FauxResponseStep };
 
 export interface HarnessOptions {
@@ -169,7 +194,7 @@ export function reply(text: string) {
 }
 
 /** A scripted assistant message that calls one tool. */
-export function call(name: string, args: Record<string, unknown>) {
+export function call(name: string, args: JsonObject) {
   return fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 }
 

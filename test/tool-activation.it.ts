@@ -7,7 +7,7 @@ import release from "../extensions/release/index";
 import research from "../extensions/research/index";
 import scenarios from "../extensions/scenarios/index";
 import verify from "../extensions/verify/index";
-import { createHarness, reply, writeProjectConfig } from "./harness";
+import { createHarness, reply, seenBy, writeProjectConfig } from "./harness";
 
 const ALL = [verify, scenarios, browser, research, release, polish, expand];
 
@@ -19,8 +19,7 @@ async function toolsFor(prompt: string, files: Record<string, string>, configs: 
     let system = "";
     h.faux.setResponses([
       (context) => {
-        names = (context.tools ?? []).map((t) => t.name);
-        system = context.systemPrompt ?? "";
+        ({ tools: names, systemPrompt: system } = seenBy(context));
         return reply("ok");
       },
     ]);
