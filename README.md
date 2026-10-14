@@ -25,7 +25,7 @@ Eleven Pi extensions, three skills, four prompt templates, and a config layering
 |---|---|
 | **anti-loop** | Breaks weak-model thrash. Blocks a tool call repeated 3 times with no edit in between (also when calls alternate, A,B,A,B,A), aborts mid-stream when the thinking channel cycles the same plan lines, auto-continues on max-output-token truncation, recovers "ghost" tool calls written as text (Hermes `<tool_call>`, `<function_call>`, `[TOOL_CALLS]`, bare JSON), and hard-stops the agent after 2 recoveries without progress so a stuck model can't pin your GPU. A successful edit counts as progress and resets the budget. `/anti-loop on\|off\|status\|reset` · **User-help** mode: when the model is going in circles — or you type while it is visibly thrashing — it stops investigating and asks you for what it cannot observe (where it broke, console output, the exact click). Ordinary steering while it works is delivered as-is. Also entered after a hard stop. `/stuck`, `/stuck off` |
 | **verify** | Blocking lint/build/test gate. Lints changed files inline after every edit; at the end of each turn runs the full check suite and, if it fails, re-triggers a fix turn with a classified failure report (max 5 attempts, then it gives up cleanly). Python (ruff/pytest), Node (eslint/tsc/npm test), C# (dotnet) out of the box; any language via config. `/verify`, `/doctor` |
-| **scenarios** | Acceptance-test gate. The model must *define* user-visible flows (`define_scenarios`), write runnable specs (Playwright for web, pytest for API, scripts otherwise), and *pass* them (`run_scenarios`) before finishing. Includes spec-quality auditing (catches "weak proof" specs that pass without actually testing the flow), failure screenshots fed back as vision input, an optional visual-QA screenshot gate (model- or human-approved), and spec housekeeping. `/scenarios …` |
+| **scenarios** | Acceptance-test gate. The model must *define* user-visible flows (`define_scenarios`), write runnable specs (Playwright for web, pytest for API, scripts otherwise), and *pass* them (`run_scenarios`) before finishing. Includes spec-quality auditing (catches "weak proof" specs that pass without actually testing the flow), failure screenshots fed back as vision input, an optional visual-QA screenshot gate (model- or human-approved), and spec housekeeping. Runs report live progress (`Scenario 3/10: login (2 passed, 0 failed)`); a spec that was renamed or deleted drops out of the registry instead of failing as "missing" forever. Housekeeping deletes throwaway `__*.spec.ts` probes once the gate passes, flags real duplicates (rewritten copies like `login-v2`, identical test titles), and only nags above a per-project spec cap (`/scenarios cap <n>`). Optional **model review** (`housekeeping.modelReview`, or `/scenarios review` on demand): the model proposes specs to scrap — or a higher cap for a broad project — with a reason for each; you confirm in a dialog, and only the extension deletes. `/scenarios …` |
 | **browser-console** | Attaches to a live Chrome/Edge via CDP (auto-launches a debug profile if needed). Console errors after web edits come back inline in the edit result; remaining errors block the finish. Also: network failure reports, live-tab screenshots with Playwright fallback, navigate/reload tools. `/browser …` |
 | **project-context** | Auto-scaffolds an `AGENTS.md` at the repo root on first session (never overwrites) and injects it into the first turn. `/agents-init` |
 | **research** | `web_search` + `fetch_web_page` via the Brave Search API (free tier works) so the model can look up real docs instead of hallucinating APIs. `/research setup` |
@@ -45,6 +45,7 @@ Small models ignore polite instructions. Everything here is enforced *mechanical
 - Repeated tool calls are **blocked at the harness level** with a steering message, not just discouraged.
 - Screenshots are **attached as images** to the conversation, so "the layout looks right" claims are grounded in pixels.
 - Every gate has a **max-attempt cap** and a hard stop, so a model that can't fix something fails loudly instead of burning your GPU overnight.
+- While a gate runs, the working indicator shows **what it is doing and for how long** (`Verifying (lint/tests) — python test · 0:08`), so a long Playwright run doesn't look like a hang.
 
 ### Skills & prompts
 
@@ -114,6 +115,8 @@ Frequently used toggles:
 
 - `/anti-loop off` — disable thrash protection (e.g. when driving a big cloud model)
 - `/scenarios qa on` — enable the visual-QA screenshot gate (`model` or `human` approve mode)
+- `/scenarios cap <n>` — how many specs a project may have before housekeeping hints start (default 10)
+- `"housekeeping": { "modelReview": true }` in `scenarios` config — let the model propose spec cleanup after a green gate (you confirm each removal)
 - `"blocking": false` in `verify`/`scenarios`/`browser-console` config — advisory mode instead of hard gates
 
 ## Per-project notes (AGENTS.md)
