@@ -22,6 +22,7 @@ export function buildBlueprintProcedure(opts: {
 3. Tiers: \`## v1\` = the smallest version that is a usable product. Then \`## v2\`, \`## later\`. Build vertical slices (each item usable on its own), not layers.
 4. Items: one line each, small enough to build and prove in one sitting, described in checkable terms (inputs, limits, visible result).
 5. Evidence: every item says what proves it — a Playwright/pytest spec file, \`verify\` (the project's tests), or \`manual\` (only the user can judge, e.g. "feels fun").
+   **Bar:** \`product\` when a person is meant to use the result (an app or game, "make it playable/usable", quality matters) — then fill the gaps the sources leave: for every item ask "how does the user do this, and what do they see?", write it as \`· input: …\`, and add items for what the sources never mention (selecting, confirming, leaving a screen, what an old mode does once a new one starts). Add 1–2 \`@journey\` items: the main flow start to finish through real input. \`spec\` when only what is written is wanted (a library, an API, "just what the doc says") — gaps go under \`## Assumptions\` as questions. If the request does not tell you, ask the user once.
 6. References: ${images} Describe each under \`## References\` with what it shows, which items it informs, and what it cannot prove (motion, feel, exact colours).
 7. Call blueprint_check and fix every problem it reports.${opts.forAutopilot ? "\n8. Then call start_autopilot again." : "\n8. Then stop and tell the user the blueprint is ready (they can build it step by step or start autopilot on it)."}
 
@@ -30,11 +31,13 @@ Format:
 # Blueprint: <name>
 
 Goal: <one line>
+Bar: product | spec
 Stack: <languages/frameworks>
 
 ## v1 — core
-- [ ] **R-01** <what it does, checkably> · proves: <name>.spec.ts
+- [ ] **R-01** <what it does, checkably> · input: <how the user does it, e.g. click a node on the map> · proves: <name>.spec.ts
 - [ ] **R-02** <…> · proves: verify
+- [ ] **R-03** Journey: <the main flow, start to finish> · input: <the steps> · proves: <flow>.spec.ts (test title ends with @journey)
 
 ## v2
 - [ ] **R-10** <…> · proves: <name>.spec.ts
@@ -79,9 +82,12 @@ export function buildBrief(opts: {
         ? "Evidence: the project's verify suite (lint/build/tests) must pass, including tests you add for this item."
         : "Evidence: manual — build it; the user confirms it at the end.";
   const refs = opts.refs.length ? `\nReferences for this item (attached): ${opts.refs.join(", ")}` : "";
+  const input = item.fields.input
+    ? `\nThe user does it by: ${item.fields.input} — build that path, and make the spec do exactly that with real input (no app functions for the user's actions).`
+    : "";
   return `AUTOPILOT${opts.resumed ? " (resumed)" : ""} — next item ${item.id}${opts.attempt > 1 ? ` (attempt ${opts.attempt}/${opts.maxAttempts})` : ""} · ${opts.progress}${opts.timeNote ? ` · ${opts.timeNote}` : ""}
 
-${item.id}: ${item.title}
+${item.id}: ${item.title}${input}
 ${evidence}${refs}
 
 Build ${item.id} now, then make its evidence pass. Do not work on other items, and do not change the [ ] marks in the blueprint — autopilot sets them from evidence. ${ASSUMPTION_RULE}
@@ -107,6 +113,21 @@ export function buildReplan(minutesLeft: number, open: BlueprintItem[]): string 
 ${open.map((i) => `  ${i.id} ${i.title.slice(0, 80)}`).join("\n")}
 
 Re-plan: call defer_items for what will not fit (one-line reason each; the most valuable items stay). You may also reorder items in the blueprint. Then continue with the first open item.`;
+}
+
+/** Product bar, once before the run may finish: use it as a person would, then report. */
+export function buildPlaytest(journeys: string[], playAvailable: boolean): string {
+  const run = journeys.length
+    ? `Run the @journey spec(s) (${journeys.join(", ")}) with run_scenarios, then`
+    : "There is no @journey spec yet — write one (the main flow start to finish, real input only), run it, then";
+  const look = playAvailable
+    ? "go through the main flow yourself with `play`: every screen or stage, entering and leaving it, the controls on each. You are checking that a person can do it and that it makes sense — not playing well."
+    : "check each screen or stage of the main flow can be reached and left through the UI.";
+  return `AUTOPILOT — playtest before finishing (result bar: product). Every item passed its evidence; now check that a person can actually use what was built.
+
+${run} ${look}
+
+For anything a person could not do, could not understand, or that looks wrong — add an item to the current tier of the blueprint (\`- [ ] **R-nn** … · input: … · proves: …\`). Then stop: autopilot builds the new items, or finishes if you added none.`;
 }
 
 export function buildFinishCheck(open: BlueprintItem[]): string {

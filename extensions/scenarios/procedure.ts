@@ -1,6 +1,6 @@
 import { WEB_TOOLING_CORE, WEB_LANE_DETAILS, FLUTTER_LANE_DETAILS } from "../shared/web-tooling-guide";
 import type { StackDetection } from "../shared/stack-detect";
-import type { ScenarioLevel } from "./config";
+import type { ResultBar, ScenarioLevel } from "./config";
 
 /**
  * Short acceptance-scenario core — always injected when scenarios are enabled.
@@ -22,9 +22,24 @@ Where tests go:
 - **Rules** (numbers, formulas, state changes) → unit tests in the project's own test runner (the verify gate runs them). Specs prove what the user **sees and does**: input, screens, navigation, rendering — not a rule re-checked through the browser.
 - **One spec file per area** (energy.spec.ts, travel.spec.ts), many tests inside. Add to the matching file; a new file only for a new area. When behaviour changes, update its test — never add a second one beside it.
 - First line of each spec: \`// @covers: <source paths or globs it proves>\`.
-- Keep 3–5 **smoke** tests (title ends with @smoke) that play the core loop end to end.
+- Keep 1–3 **journey** tests (title ends with @journey): the main thing a user comes to do, start to finish, with **real input only** — every step a click, key or typed value. Test hooks may set conditions (seed, time scale, feature flags, spawn, reset), never perform the user's actions (\`goToStage\`, \`chartTo\`, \`save\`…). A journey proves the wiring, not skill: for a real-time game, slow time or turn on invincibility rather than play well. Journeys run on every gate.
+- Other specs may set things up through hooks, but the action a spec is about goes through the UI. A spec that only calls the app's own functions proves the logic, not that a person can do it — that is a unit test.
 \`/scenarios tidy\` when the folder grows.
 `.trim();
+
+/** What "done" means, per result bar. */
+export const BAR_TEXT: Record<ResultBar, string> = {
+  unset:
+    "Result bar: **not set**. Before the first real build, decide what done means and call set_result_bar:\n" +
+    "- **product** — a person must be able to use everything you build. Fill the gaps the brief leaves: how the user does each thing, what they see, how one screen or stage hands over to the next. Prove the main flows with @journey specs. Choose it for an app or game meant to be used (\"build a game\", \"make it playable / usable\", \"final quality matters\").\n" +
+    "- **spec** — build what is written, no more; record gaps as questions or assumptions instead of inventing. Choose it for libraries, fixes, APIs, or \"only what the doc says\".\n" +
+    "If the request does not tell you, ask the user once.",
+  product:
+    "Result bar: **product** — build something a person can use, not just what the brief lists. For every feature ask \"how does the user do this, and what do they see?\" and build that too: input, feedback, entering and leaving each screen or stage. Where old and new behaviour overlap, decide what each stage turns off. " +
+    "Prove the main flows with @journey specs (real input only). Never call work \"done\", \"playable\" or \"usable\" unless the @journey specs passed this session — otherwise say what you have not verified.",
+  spec:
+    "Result bar: **spec** — build what the brief states, no more. Where it leaves a gap a user would hit, write it down as a question or assumption for the user instead of inventing. Still say plainly what a user cannot do yet.",
+};
 
 /** One paragraph per gate level, appended to the core. */
 export const LEVEL_TEXT: Record<ScenarioLevel, string> = {
@@ -41,8 +56,9 @@ export function buildScenariosProcedure(opts: {
   includeFlutter: boolean;
   stackSummary?: string;
   level?: ScenarioLevel;
+  bar?: ResultBar;
 }): string {
-  const parts = [SCENARIOS_CORE, LEVEL_TEXT[opts.level ?? "thorough"]];
+  const parts = [SCENARIOS_CORE, LEVEL_TEXT[opts.level ?? "thorough"], BAR_TEXT[opts.bar ?? "unset"]];
   if (opts.stackSummary) {
     parts.push(`## Detected project\n\n${opts.stackSummary}`);
   }

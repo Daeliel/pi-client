@@ -21,6 +21,7 @@ import { ANTI_LOOP_PROCEDURE } from "./procedure";
 import {
   isEditTool,
   lastRecoveryUsesUserHelp,
+  isFruitlessResult,
   shouldNotifyApproachChurn,
   USER_HELP_PROCEDURE,
   USER_HELP_PROMPT,
@@ -47,6 +48,8 @@ export default function (pi: ExtensionAPI) {
   let recoveryEpoch = 0;
 
   const uniqueFingerprints = new Set<string>();
+  /** Calls this turn that found nothing (error, no match, empty output). */
+  let fruitlessCalls = 0;
   let editCount = 0;
   let churnNotifiedThisTurn = false;
 
@@ -74,6 +77,7 @@ export default function (pi: ExtensionAPI) {
     steeredThisTurn = false;
     thinkingLoopFired = false;
     uniqueFingerprints.clear();
+    fruitlessCalls = 0;
     editCount = 0;
     churnNotifiedThisTurn = false;
   }
@@ -312,6 +316,30 @@ export default function (pi: ExtensionAPI) {
     return tryRecover(ctx, config, THINKING_LOOP_STEER, "thinking", true);
   }
 
+  /** One "looks stuck" notice per turn; it also marks the run as stuck for user-help. */
+  function maybeNotifyChurn(ctx: ExtensionContext, config: AntiLoopConfig) {
+    if (
+      !shouldNotifyApproachChurn({
+        uniqueFingerprints: uniqueFingerprints.size,
+        fruitlessCalls,
+        editCount,
+        threshold: config.churnNotifyAfterUniqueTools,
+        fruitlessThreshold: config.churnNotifyAfterFruitless,
+        alreadyNotified: churnNotifiedThisTurn,
+        userHelpActive,
+      })
+    ) {
+      return;
+    }
+    churnNotifiedThisTurn = true;
+    if (ctx.hasUI) {
+      const why = fruitlessCalls >= config.churnNotifyAfterFruitless && config.churnNotifyAfterFruitless > 0
+        ? `${fruitlessCalls} calls found nothing`
+        : `${uniqueFingerprints.size} calls`;
+      ctx.ui.notify(`Anti-loop: ${why} and no edits yet. Type what you see, or /stuck.`, "warning");
+    }
+  }
+
   pi.on("tool_call", async (event, ctx) => {
     const config = cfg(ctx);
     if (!config.enabled) return;
@@ -333,20 +361,7 @@ export default function (pi: ExtensionAPI) {
       if (userHelpActive) userHelpSawEdit = true;
     }
 
-    if (
-      shouldNotifyApproachChurn({
-        uniqueFingerprints: uniqueFingerprints.size,
-        editCount,
-        threshold: config.churnNotifyAfterUniqueTools,
-        alreadyNotified: churnNotifiedThisTurn,
-        userHelpActive,
-      })
-    ) {
-      churnNotifiedThisTurn = true;
-      if (ctx.hasUI) {
-        ctx.ui.notify("Anti-loop: many different approaches, no edits. Type what you see, or /stuck.", "warning");
-      }
-    }
+    maybeNotifyChurn(ctx, config);
 
     const seen = (callsSinceEdit.get(fp) ?? 0) + 1;
     callsSinceEdit.set(fp, seen);
@@ -380,8 +395,17 @@ export default function (pi: ExtensionAPI) {
   // window and the recovery budget start over. The edit's own fingerprint keeps its
   // count, so writing the same content again and again is still caught.
   pi.on("tool_result", async (event, ctx) => {
-    if (!cfg(ctx).enabled || hardStopped) return;
-    if (!isEditTool(event.toolName) || event.isError) return;
+    const config = cfg(ctx);
+    if (!config.enabled || hardStopped) return;
+    if (!isEditTool(event.toolName)) {
+      // Exploring finds things; thrashing keeps coming back empty or failing.
+      if (isFruitlessResult(Boolean(event.isError), event.content)) {
+        fruitlessCalls += 1;
+        maybeNotifyChurn(ctx, config);
+      }
+      return;
+    }
+    if (event.isError) return;
     const fp = toolFingerprint(event.toolName, "input" in event ? event.input : undefined);
     const own = callsSinceEdit.get(fp) ?? 0;
     callsSinceEdit.clear();

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildScenariosProcedure, LEVEL_TEXT, SCENARIOS_CORE } from "./procedure.ts";
+import { BAR_TEXT, buildScenariosProcedure, LEVEL_TEXT, SCENARIOS_CORE } from "./procedure.ts";
 
 describe("scenarios procedure tiers", () => {
   it("core alone is short and has no flutter canvas block", () => {
@@ -8,7 +8,7 @@ describe("scenarios procedure tiers", () => {
     assert.ok(text.includes("Lane A"));
     assert.ok(!text.includes("two browsers"));
     assert.ok(!text.includes("flutter build web"));
-    assert.ok(text.length < SCENARIOS_CORE.length + LEVEL_TEXT.thorough.length + 80);
+    assert.ok(text.length < SCENARIOS_CORE.length + LEVEL_TEXT.thorough.length + BAR_TEXT.unset.length + 80);
   });
 
   it("says where tests go at every level, and how much each level runs", () => {

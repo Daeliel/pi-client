@@ -5,6 +5,7 @@ import { checkBlueprint, formatSummary, inScope, nextItem, parseBlueprint, setMa
 const BP = `# Blueprint: pixel editor
 
 Goal: a browser pixel-art editor.
+Bar: spec
 
 ## v1 — core
 - [x] **R-01** Canvas: create 32/64/128 px, zoom 1-16x, grid toggle · proves: canvas.spec.ts
@@ -77,6 +78,24 @@ describe("blueprint", () => {
     assert.match(problems, /proves "palette"/);
     assert.match(problems, /needs a checkbox/);
     assert.match(checkBlueprint(parseBlueprint("Goal: g\n")).join("\n"), /No items/);
+  });
+
+  it("product bar: every item a user does must say how they do it", () => {
+    const bp = (bar: string) =>
+      parseBlueprint(`Goal: a route-map game
+Bar: ${bar}
+
+## v1
+- [ ] **R-01** Pick the next destination on the route map · proves: route-map.spec.ts
+- [ ] **R-02** Route generation keeps 5-20 nodes per leg · proves: verify
+- [ ] **R-03** The chart shows the risk of each branch · input: hover a node on the map · proves: chart.spec.ts
+`);
+    const product = checkBlueprint(bp("product")).join("\n");
+    assert.match(product, /R-01: product bar — say how the user does it/);
+    assert.doesNotMatch(product, /R-02/, "verify-proved rules need no input");
+    assert.doesNotMatch(product, /R-03/, "has its input");
+    assert.deepEqual(checkBlueprint(bp("spec")), [], "spec bar: no input required");
+    assert.match(checkBlueprint(parseBlueprint("Goal: g\n\n## v1\n- [ ] **R-01** Something checkable here · proves: verify\n")).join(), /No `Bar: product` or `Bar: spec` line/);
   });
 
   it("summaries for the footer and the brief", () => {

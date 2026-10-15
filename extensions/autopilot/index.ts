@@ -33,13 +33,15 @@ import {
   buildBlueprintProcedure,
   buildBrief,
   buildFinishCheck,
+  buildPlaytest,
   buildReplan,
   buildRetry,
   buildStallNudge,
   formatMinutes,
 } from "./procedure";
 import { loadConfig as loadResearchConfig, resolveApiKey } from "../research/config";
-import { loadConfig as loadScenariosConfig } from "../scenarios/config";
+import { loadConfig as loadScenariosConfig, persistResultBar } from "../scenarios/config";
+import { findJourneySpecs } from "../scenarios/spec-audit";
 import { loadVisionImages } from "../scenarios/vision";
 import { presentVisionToSession } from "../shared/vision-relay";
 import { extractEditPath, isEditTool } from "../shared/edit-tools";
@@ -83,6 +85,8 @@ interface RunState {
   replanAt: number;
   startedAt: string;
   stopReason?: string;
+  /** Product bar: the one playtest turn before finishing has been asked for. */
+  playtested?: boolean;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -111,6 +115,12 @@ export default function (pi: ExtensionAPI) {
 
   function notify(ctx: ExtensionContext, msg: string, kind: "info" | "warning" | "error" = "info") {
     if (ctx.hasUI) ctx.ui.notify(msg, kind);
+  }
+
+  /** The blueprint's Bar line wins; else the project's scenarios result bar. */
+  function resultBar(ctx: ExtensionContext): "product" | "spec" | "unset" {
+    const bp = readBlueprint(ctx.cwd, cfg(ctx).blueprintPath);
+    return bp?.parsed.bar ?? loadScenariosConfig(ctx.cwd).bar;
   }
 
   // ---------- run state on disk ----------
@@ -379,6 +389,8 @@ export default function (pi: ExtensionAPI) {
     segmentStart = Date.now();
     finishRequested = false;
     planning = false;
+    // The blueprint decided what done means; let the scenarios gate (journeys) agree.
+    if (bp.parsed.bar && loadScenariosConfig(ctx.cwd).bar === "unset") persistResultBar(ctx.cwd, bp.parsed.bar);
     const first = pickNext(items) ?? null;
     if (first) {
       run.current = first.id;
@@ -576,6 +588,16 @@ export default function (pi: ExtensionAPI) {
           state = reconcile(ctx)!;
           next = pickNext(state.items);
           if (!next) {
+            // Product bar: every item passed, but "passes" is not "a person can use it".
+            if (resultBar(ctx) === "product" && !r.playtested) {
+              r.playtested = true;
+              saveRun(ctx);
+              if (!tryClaimGate("autopilot")) return;
+              editsAtBrief = editSerial;
+              const journeys = findJourneySpecs(ctx.cwd, loadScenariosConfig(ctx.cwd));
+              pi.sendUserMessage(buildPlaytest(journeys, pi.getActiveTools().includes("play")), { deliverAs: "followUp" });
+              return;
+            }
             stopRun(ctx, "done", "scope complete", state.items);
             return;
           }

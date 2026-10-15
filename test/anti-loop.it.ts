@@ -19,6 +19,41 @@ describe("anti-loop", () => {
     }
   });
 
+  it("exploring code (many reads that find things) is not called stuck; calls that find nothing are", async () => {
+    const files: Record<string, string> = {};
+    for (let i = 1; i <= 8; i++) files[`src/m${i}.js`] = `export const m${i} = ${i};`;
+    const notices: string[] = [];
+    const ui = { notify: ((msg: string) => notices.push(msg)) as never };
+
+    const h = await createHarness({ extensions: [antiLoopExt], files, ui });
+    try {
+      h.faux.setResponses([
+        ...Object.keys(files).map((p) => call("read", { path: p })), // 8 different reads, all productive
+        call("write", { path: "src/layout.js", content: "export const posOf = () => 0;" }),
+        reply("extracted the layout"),
+        reply("unused"),
+      ]);
+      await h.session.prompt("check how the player selects movement on the chart");
+      assert.deepEqual(notices.filter((n) => n.startsWith("Anti-loop")), [], notices.join(" | "));
+    } finally {
+      h.dispose();
+    }
+
+    const h2 = await createHarness({ extensions: [antiLoopExt], ui });
+    notices.length = 0;
+    try {
+      h2.faux.setResponses([
+        ...[1, 2, 3, 4, 5].map((i) => call("read", { path: `missing-${i}.js` })), // 5 calls that find nothing
+        reply("hmm"),
+        reply("unused"),
+      ]);
+      await h2.session.prompt("find the bug");
+      assert.equal(notices.filter((n) => /Anti-loop: 5 calls found nothing and no edits yet/.test(n)).length, 1, notices.join(" | "));
+    } finally {
+      h2.dispose();
+    }
+  });
+
   it("blocks the same read repeated without edits, even when calls alternate", async () => {
     const h = await createHarness({
       extensions: [antiLoopExt],

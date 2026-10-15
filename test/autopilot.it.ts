@@ -11,6 +11,7 @@ const BLUEPRINT = ".pi/blueprint/BLUEPRINT.md";
 const BP = `# Blueprint: app
 
 Goal: make a.app say fixed and b.app record the second step.
+Bar: spec
 
 ## v1
 - [ ] **R-01** a.app contains the word fixed when opened · proves: verify
@@ -218,6 +219,45 @@ describe("autopilot", () => {
       } finally {
         hh.dispose();
       }
+    }
+  });
+
+  it("product bar: one playtest before finishing; what it finds becomes items and gets built", async () => {
+    const PRODUCT = BP.replace("Bar: spec", "Bar: product");
+    const h = await createHarness({ extensions: [autopilotExt], files: { [BLUEPRINT]: PRODUCT }, ui: approvingUi() });
+    try {
+      writeProjectConfig(h.cwd, "verify.config.json", APP_VERIFY_CONFIG);
+      writeProjectConfig(h.cwd, "autopilot.config.json", { checkpoints: false });
+      const withFinding = PRODUCT.replace("- [ ] **R-01**", "- [x] **R-01**").replace("- [ ] **R-02**", "- [x] **R-02**") +
+        "- [ ] **R-03** c.app explains what the second step did, so a person understands it · proves: verify\n";
+      h.faux.setResponses([
+        call("start_autopilot", { goal: "app" }),
+        call("write", { path: "a.app", content: "fixed" }),
+        reply("R-01 done"),
+        call("write", { path: "b.app", content: "done" }),
+        reply("R-02 done"),
+        // playtest turn: the model finds a gap and adds it as an item
+        call("write", { path: BLUEPRINT, content: withFinding }),
+        reply("playtest: added R-03"),
+        call("write", { path: "c.app", content: "explained" }),
+        reply("R-03 done"),
+        reply("unused"),
+      ]);
+      await h.session.prompt("build it to spec and come back when it's done");
+      await h.settle();
+
+      const users = h.userMessages();
+      assert.equal(startsWith(users, "AUTOPILOT — playtest before finishing (result bar: product)"), 1, "exactly one playtest");
+      assert.equal(startsWith(users, "AUTOPILOT — next item R-03"), 1, "the finding was built");
+      assert.match(readBp(h.cwd), /- \[x\] \*\*R-03\*\*/);
+      const run = JSON.parse(fs.readFileSync(path.join(h.cwd, ".pi/blueprint/run.json"), "utf8"));
+      assert.equal(run.status, "done");
+      assert.equal(run.playtested, true);
+      assert.equal(h.faux.getPendingResponseCount(), 1);
+      const saved = JSON.parse(fs.readFileSync(path.join(h.cwd, ".pi/scenarios.config.json"), "utf8"));
+      assert.equal(saved.bar, "product", "the blueprint's bar became the project's");
+    } finally {
+      h.dispose();
     }
   });
 

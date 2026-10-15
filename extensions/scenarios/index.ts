@@ -3,8 +3,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "typebox";
 import {
+  isResultBar,
   isScenarioLevel,
   loadConfig,
+  persistResultBar,
   persistMaxSpecsBeforeAudit,
   persistQaShotEnabled,
   persistQaShotMode,
@@ -41,7 +43,7 @@ import {
   formatTidyReport,
   setCanonicalPick,
 } from "./housekeeping";
-import { formatSpecPatternWarnings, scanSpecPatterns } from "./spec-audit";
+import { findJourneySpecs, formatSpecPatternWarnings, scanSpecPatterns } from "./spec-audit";
 import {
   alreadyReviewed,
   buildPendingReview,
@@ -79,6 +81,7 @@ const TOOLS = [
   "play",
   "play_save_spec",
   "confirm_visual_qa",
+  "set_result_bar",
   "scenarios_housekeep",
   "list_scenarios",
   "propose_scenario_cleanup",
@@ -142,6 +145,10 @@ export default function (pi: ExtensionAPI) {
   /** The review prompt's run is in progress; its agent_end closes the review. */
   let reviewRunning = false;
   let configCache: ScenariosConfig | null = null;
+  function hasJourneySpec(cwd: string, config: ScenariosConfig): boolean {
+    return findJourneySpecs(cwd, config).length > 0;
+  }
+
   /** Play mode session (one at a time; ends with the run). */
   let play: PlaySession | null = null;
 
@@ -234,6 +241,7 @@ export default function (pi: ExtensionAPI) {
     const wanted = ["scaffold_scenario", "define_scenarios", "run_scenarios"];
     if (shouldInjectWebProcedure(ctx.cwd, changedFiles)) wanted.push("capture_page_screenshot", "play", "play_save_spec");
     if (qaMode(config) === "model") wanted.push("confirm_visual_qa");
+    if (config.bar === "unset") wanted.push("set_result_bar");
     if (activeReview) wanted.push("propose_scenario_cleanup");
     syncOwnedTools(pi, TOOLS, wanted);
   }
@@ -355,6 +363,7 @@ export default function (pi: ExtensionAPI) {
       includeFlutter,
       stackSummary: detection.summary,
       level: config.level,
+      bar: config.bar,
     });
 
     return {
@@ -607,6 +616,23 @@ export default function (pi: ExtensionAPI) {
         recordRunResults(result, picked);
       }
       if (levelNote && ctx.hasUI) ctx.ui.notify(levelNote, "info");
+
+      // Product bar: green specs are not enough — the main flow must be proven end to end
+      // through real input, or "everything passes" can mean "nobody can use it".
+      if (config.bar === "product" && !hasJourneySpec(ctx.cwd, config)) {
+        if (fixAttempts < config.maxFixAttempts && tryClaimGate("scenarios")) {
+          fixAttempts += 1;
+          persist();
+          pi.sendUserMessage(
+            `Result bar is **product**, and no @journey spec exists (attempt ${fixAttempts}/${config.maxFixAttempts}). ` +
+              `Write one under ${config.scenariosDir}: the main thing a user comes to do, start to finish, every step through real input ` +
+              `(clicks, keys, typing — no app functions for the user's actions; hooks only for seed/time/flags/spawn/reset). ` +
+              `Title ends with @journey. Then run_scenarios. If a step cannot be done through the UI, that is the bug to fix.`,
+            { deliverAs: "followUp" },
+          );
+          return;
+        }
+      }
 
       if (shouldRunQaGate(config)) {
         if (qaFixAttempts >= config.maxFixAttempts) {
@@ -1113,6 +1139,39 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "set_result_bar",
+    label: "Set Result Bar",
+    description:
+      "Record what 'done' means for this project, once: product (a person must be able to use everything — fill the gaps the brief leaves, prove main flows with @journey specs) " +
+      "or spec (build what is written; record gaps as questions). Decide from the user's request; ask the user first when it does not say.",
+    promptSnippet: "Record: product or spec (what done means here)",
+    parameters: Type.Object({
+      bar: Type.Union([Type.Literal("product"), Type.Literal("spec")]),
+      reason: Type.String({ description: "One line: what in the request decided it (or that the user chose it)." }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const file = persistResultBar(ctx.cwd, params.bar);
+      configCache = null;
+      syncTools(ctx);
+      if (ctx.hasUI) {
+        ctx.ui.notify(`Result bar: ${params.bar} — ${params.reason}\n(saved to ${file}; change with /scenarios bar product|spec)`, "info");
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              params.bar === "product"
+                ? "Result bar: product. Build what a person needs to use each feature (input, feedback, stage hand-offs), and prove the main flow with a @journey spec — real input only."
+                : "Result bar: spec. Build what the brief states; write gaps down as questions or assumptions for the user.",
+          },
+        ],
+        details: { bar: params.bar },
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "confirm_visual_qa",
     label: "Confirm Visual QA",
     description:
@@ -1321,7 +1380,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("scenarios", {
     description:
-      "Acceptance scenarios — list | run | run-all | sync | level | tidy | review | cap | pick | clear | doctor | qa on|off|status|model|human|approve [project]",
+      "Acceptance scenarios — list | run | run-all | sync | level | bar | tidy | review | cap | pick | clear | doctor | qa on|off|status|model|human|approve [project]",
     handler: async (args, ctx) => {
       const config = cfg(ctx);
       if (!config.enabled) {
@@ -1386,6 +1445,30 @@ export default function (pi: ExtensionAPI) {
         const file = persistScenarioLevel(ctx.cwd, wanted, parts[2]?.toLowerCase() === "user" ? "user" : "project");
         configCache = null;
         ctx.ui.notify(`Scenario level: ${wanted} (saved to ${file}).`, "info");
+        return;
+      }
+
+      if (sub === "bar") {
+        const wanted = parts[1]?.toLowerCase();
+        if (!wanted) {
+          ctx.ui.notify(
+            `Result bar: ${config.bar}.\n` +
+              "  product — a person must be able to use everything; gaps filled; main flows proven by @journey specs\n" +
+              "  spec    — build what the brief states; gaps recorded as questions\n" +
+              "  unset   — the model decides on the first real build (asks you when unclear)\n" +
+              "/scenarios bar product|spec|unset — saved for this project.",
+            "info",
+          );
+          return;
+        }
+        if (!isResultBar(wanted)) {
+          ctx.ui.notify("Use /scenarios bar product, spec or unset.", "warning");
+          return;
+        }
+        const file = persistResultBar(ctx.cwd, wanted);
+        configCache = null;
+        syncTools(ctx);
+        ctx.ui.notify(`Result bar: ${wanted} (saved to ${file}).`, "info");
         return;
       }
 
@@ -1612,7 +1695,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       ctx.ui.notify(
-        "Usage: /scenarios list | run | run-all | sync | level [thorough|standard] [user] | tidy | review | cap | pick <group> <n> | clear | doctor | qa on|off|model|human|approve|status [project]",
+        "Usage: /scenarios list | run | run-all | sync | level [thorough|standard] [user] | bar [product|spec|unset] | tidy | review | cap | pick <group> <n> | clear | doctor | qa on|off|model|human|approve|status [project]",
         "info",
       );
     },

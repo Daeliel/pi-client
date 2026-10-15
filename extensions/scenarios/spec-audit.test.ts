@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { scanSpecFileContent, hasBlockingSpecWarnings } from "./spec-audit.ts";
+import { classifyAppCall, scanSpecFileContent, hasBlockingSpecWarnings } from "./spec-audit.ts";
 
 describe("spec-audit", () => {
   it("blocks localStorage cheats", () => {
@@ -73,6 +73,53 @@ describe("spec-audit", () => {
       `() => { const g = window.__game; g.stage = "travel"; }`,
     ]) {
       assert.ok(hasBlockingSpecWarnings(scanSpecFileContent("w.spec.ts", evalSpec(write))), write);
+    }
+  });
+
+  it("back doors: the user's actions through app functions are caught, setup and reads are not", () => {
+    // route-map.spec.ts as it was: reach the chart and pick a node by calling the game.
+    const backdoor = `test("chart a course", async ({ page }) => {
+      await page.evaluate(() => window.__game.setFeature("runMap", true));
+      await page.evaluate(() => window.__game.goToStage("chart"));
+      const r = await page.evaluate(() => window.__game.route());
+      await page.evaluate((id) => window.__game.chartTo(id), r.choices[0].id);
+      expect((await page.evaluate(() => window.__game.route())).at).toBe(r.choices[0].id);
+    });`;
+    const w = scanSpecFileContent("route-map.spec.ts", backdoor);
+    assert.ok(hasBlockingSpecWarnings(w));
+    assert.match(w.map((x) => x.message).join(), /only through its own functions \(goToStage\(\), chartTo\(\)\)/);
+
+    // Same flow, setup by hook, the action by clicking: fine.
+    const real = `test("chart a course", async ({ page }) => {
+      await page.evaluate(() => window.__game.setFeature("runMap", true));
+      await page.keyboard.press("Enter");
+      await page.mouse.click(420, 180);
+      expect((await page.evaluate(() => window.__game.route())).at).toBe("n-1-0");
+    });`;
+    assert.ok(!hasBlockingSpecWarnings(scanSpecFileContent("route-map.spec.ts", real)));
+  });
+
+  it("a @journey may set conditions through hooks but not perform the user's actions", () => {
+    const journey = (calls: string) => `test("chart, build, travel @journey", async ({ page }) => {
+      ${calls}
+      await page.mouse.click(420, 180);
+      await page.keyboard.press("Space");
+    });`;
+    const conditions = `await page.evaluate(() => { window.__game.setSeed(7); window.__game.setTimeScale(0.2); window.__game.setGodMode(true); window.__game.spawnThreat("robber"); });`;
+    assert.ok(!hasBlockingSpecWarnings(scanSpecFileContent("j.spec.ts", journey(conditions))), "seed, time, invincibility, spawn are conditions");
+    const w = scanSpecFileContent("j.spec.ts", journey(`await page.evaluate(() => window.__game.commitBlueprint());`));
+    assert.match(w.map((x) => x.message).join(), /@journey spec performs user actions .*commitBlueprint\(\)/);
+  });
+
+  it("names: verbs are actions, nouns and lookups are reads", () => {
+    for (const a of ["chartTo", "goToStage", "commitBlueprint", "prepPlaceRoom", "prepLink", "repelRobber", "spendResources", "endTravel"]) {
+      assert.equal(classifyAppCall(a), "action", a);
+    }
+    for (const r of ["state", "route", "linkBonusFor", "levelOf", "overdriveState", "hudSnapshot", "getScore", "isOpen"]) {
+      assert.equal(classifyAppCall(r), "read", r);
+    }
+    for (const c of ["setFeature", "setSeed", "setTimeScale", "spawnThreat", "reset", "setGodMode"]) {
+      assert.equal(classifyAppCall(c), "condition", c);
     }
   });
 

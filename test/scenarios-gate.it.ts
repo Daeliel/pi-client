@@ -11,6 +11,7 @@ import {
   createHarness,
   NODE_SCENARIOS_CONFIG,
   reply,
+  seenBy,
   writeProjectConfig,
 } from "./harness";
 
@@ -350,6 +351,68 @@ describe("scenarios gate", () => {
         await h.settle();
         assert.equal(startsWith(h.userMessages(), "Scenario housekeeping review"), 0);
         assert.equal(h.faux.getPendingResponseCount(), 1);
+      } finally {
+        h.dispose();
+      }
+    });
+  });
+
+  describe("result bar", () => {
+    const JOURNEY = `test("open the app and save a note @journey", async ({ page }) => {
+  await page.keyboard.type("hello");
+  await page.keyboard.press("Enter");
+});
+`;
+
+    it("product: green specs are not enough until a @journey spec exists", async () => {
+      const h = await createHarness({ extensions: [scenariosExt] });
+      try {
+        writeProjectConfig(h.cwd, "scenarios.config.json", { ...NODE_SCENARIOS_CONFIG, web: { enabled: false }, bar: "product" });
+        h.faux.setResponses([
+          call("define_scenarios", { scenarios: [scenario] }),
+          call("write", { path: scenario.testFile, content: APP_SCENARIO_SCRIPT }),
+          call("write", { path: "a.app", content: "fixed" }),
+          reply("done"),
+          call("write", { path: ".pi/scenarios/notes.spec.ts", content: JOURNEY }),
+          reply("journey added"),
+          reply("unused"),
+        ]);
+        await h.session.prompt("make a.app");
+        const users = h.userMessages();
+        assert.equal(startsWith(users, "Result bar is **product**, and no @journey spec exists"), 1, users.join("\n---\n"));
+        assert.equal(h.faux.getPendingResponseCount(), 1, "quiet once a journey exists");
+      } finally {
+        h.dispose();
+      }
+    });
+
+    it("unset: the model records the bar once; the tool then goes away and the procedure follows it", async () => {
+      const h = await createHarness({ extensions: [scenariosExt] });
+      try {
+        writeProjectConfig(h.cwd, "scenarios.config.json", NODE_SCENARIOS_CONFIG);
+        let before = { tools: [] as string[], system: "" };
+        let after = { tools: [] as string[], system: "" };
+        h.faux.setResponses([
+          (context) => {
+            const s = seenBy(context);
+            before = { tools: s.tools, system: s.systemPrompt };
+            return call("set_result_bar", { bar: "product", reason: "the user wants a game a person can play" });
+          },
+          reply("noted"),
+          (context) => {
+            const s = seenBy(context);
+            after = { tools: s.tools, system: s.systemPrompt };
+            return reply("ok");
+          },
+        ]);
+        await h.session.prompt("build me a game");
+        await h.session.prompt("go on");
+        assert.ok(before.tools.includes("set_result_bar"));
+        assert.match(before.system, /Result bar: \*\*not set\*\*/);
+        assert.ok(!after.tools.includes("set_result_bar"), "set once");
+        assert.match(after.system, /Result bar: \*\*product\*\*/);
+        const saved = JSON.parse(fs.readFileSync(path.join(h.cwd, ".pi/scenarios.config.json"), "utf8"));
+        assert.equal(saved.bar, "product");
       } finally {
         h.dispose();
       }

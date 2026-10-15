@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to ~/.pi/anti-loop.config.json (all projects) or .pi/anti-loop.config.json (one repo). /anti-loop on|off persists enabled. /stuck enters user-help. churnNotifyAfterUniqueTools is notify-only (0 disables).",
+  "_comment": "Copy to ~/.pi/anti-loop.config.json (all projects) or .pi/anti-loop.config.json (one repo). /anti-loop on|off persists enabled. /stuck enters user-help. The 'looks stuck' notice is notify-only: churnNotifyAfterFruitless = calls that found nothing (errors, no-match greps, empty output) with no edit; churnNotifyAfterUniqueTools = high backstop for a run that reads forever without acting. 0 disables either.",
   "enabled": true,
   "maxIdenticalToolCalls": 3,
   "maxRecoveries": 2,
@@ -9,5 +9,6 @@
   "thinkingLoopMinRepeats": 3,
   "recoverGhostToolCalls": true,
   "userHelp": true,
-  "churnNotifyAfterUniqueTools": 6
+  "churnNotifyAfterFruitless": 5,
+  "churnNotifyAfterUniqueTools": 30
 }

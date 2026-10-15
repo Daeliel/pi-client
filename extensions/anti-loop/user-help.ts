@@ -17,18 +17,40 @@ export function lastRecoveryUsesUserHelp(
   return recoveriesAfterThis >= maxRecoveries;
 }
 
-/** Many distinct tools, no edits — notify only; do not enter user-help. */
+/**
+ * "Looks stuck" with no edits — notify only; do not enter user-help. Many reads that find
+ * things are exploration; thrash is calls that keep coming back empty or failing. The
+ * unique-call threshold is a high backstop for a run that reads forever without acting.
+ */
 export function shouldNotifyApproachChurn(opts: {
   uniqueFingerprints: number;
+  fruitlessCalls: number;
   editCount: number;
+  /** Backstop: distinct calls. 0 disables. */
   threshold: number;
+  /** Fruitless calls. 0 disables. */
+  fruitlessThreshold: number;
   alreadyNotified: boolean;
   userHelpActive: boolean;
 }): boolean {
-  if (opts.threshold <= 0) return false;
   if (opts.alreadyNotified || opts.userHelpActive) return false;
   if (opts.editCount > 0) return false;
-  return opts.uniqueFingerprints >= opts.threshold;
+  if (opts.fruitlessThreshold > 0 && opts.fruitlessCalls >= opts.fruitlessThreshold) return true;
+  return opts.threshold > 0 && opts.uniqueFingerprints >= opts.threshold;
+}
+
+/** A call that found nothing: an error (failed command, grep without a match) or empty output. */
+export function isFruitlessResult(isError: boolean, content: unknown): boolean {
+  if (isError) return true;
+  // A screenshot is a result even with no text beside it.
+  if (Array.isArray(content) && content.some((c) => c && typeof c === "object" && (c as { type?: string }).type === "image")) return false;
+  const text = Array.isArray(content)
+    ? content
+        .map((c) => (c && typeof c === "object" && (c as { type?: string }).type === "text" ? String((c as { text?: unknown }).text ?? "") : ""))
+        .join("")
+        .trim()
+    : "";
+  return text === "" || text === "(no output)";
 }
 
 export const USER_HELP_PROCEDURE = `## Anti-loop: user-help

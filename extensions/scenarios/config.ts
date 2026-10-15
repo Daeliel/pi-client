@@ -45,6 +45,19 @@ export function isScenarioLevel(value: unknown): value is ScenarioLevel {
   return value === "thorough" || value === "standard";
 }
 
+/**
+ * What "done" means for this project.
+ * product: a person must be able to use everything built — gaps the brief leaves are filled
+ *   (how the user does each thing, what they see), main flows proven by @journey specs.
+ * spec: build what the brief states; gaps are recorded as questions, not invented.
+ * unset: the model decides on the first real build (asking the user when the request does not say).
+ */
+export type ResultBar = "product" | "spec" | "unset";
+
+export function isResultBar(value: unknown): value is ResultBar {
+  return value === "product" || value === "spec" || value === "unset";
+}
+
 export interface HousekeepingConfig {
   enabled: boolean;
   /** Notify / suggest tidy when count exceeds this. */
@@ -67,6 +80,8 @@ export interface ScenariosConfig {
   enabled: boolean;
   /** thorough | standard — see ScenarioLevel. */
   level: ScenarioLevel;
+  /** product | spec | unset — see ResultBar. */
+  bar: ResultBar;
   /** Block agent_end while scenarios are undefined, missing, or failing. */
   blocking: boolean;
   maxFixAttempts: number;
@@ -104,6 +119,7 @@ export interface ScenariosConfig {
 export const DEFAULT_CONFIG: ScenariosConfig = {
   enabled: true,
   level: "thorough",
+  bar: "unset",
   blocking: true,
   maxFixAttempts: 5,
   timeoutMs: 180000,
@@ -211,6 +227,7 @@ export function loadConfig(cwd: string): ScenariosConfig {
     };
   }
   if (!isScenarioLevel(cfg.level)) cfg.level = DEFAULT_CONFIG.level;
+  if (!isResultBar(cfg.bar)) cfg.bar = DEFAULT_CONFIG.bar;
   return cfg;
 }
 
@@ -251,6 +268,15 @@ export function persistMaxSpecsBeforeAudit(cwd: string, max: number): string {
   const prev = (existing.housekeeping ?? {}) as Partial<HousekeepingConfig>;
   const toWrite = { ...existing, housekeeping: { ...prev, maxSpecsBeforeAudit: max } };
   fs.writeFileSync(target, `${JSON.stringify(toWrite, null, 2)}\n`, "utf8");
+  return target;
+}
+
+/** Save the result bar for this project. */
+export function persistResultBar(cwd: string, bar: ResultBar): string {
+  const target = projectScenariosConfigPath(cwd);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const existing = readJson(target) ?? {};
+  fs.writeFileSync(target, `${JSON.stringify({ ...existing, bar }, null, 2)}\n`, "utf8");
   return target;
 }
 

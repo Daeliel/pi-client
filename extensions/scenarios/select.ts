@@ -28,7 +28,8 @@ const STOP_WORDS = new Set([
 ]);
 
 const SMOKE_NAME = /^smoke[-_.]/i;
-const SMOKE_TAG = /@smoke\b/;
+/** Smoke and journey specs run on every gate, whatever changed. */
+const SMOKE_TAG = /@(?:smoke|journey)\b/;
 const COVERS = /@covers\s*:?\s*(.+)$/gim;
 
 /** Repo-relative posix path, lower case, for comparing edited paths with headers. */

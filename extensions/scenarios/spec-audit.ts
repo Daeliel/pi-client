@@ -146,6 +146,92 @@ export function evaluateBodies(text: string): string[] {
   return bodies;
 }
 
+// ---------- back doors: calling the app's own functions instead of using its UI ----------
+
+/** First words that make an app function an action the user would do in the UI. */
+const ACTION_VERBS = new Set(
+  (
+    "go goto set add remove delete del launch commit fold decouple couple step chart place undo redo " +
+    "start stop apply trigger fire move build buy sell equip unequip use select choose pick toggle open close " +
+    "submit create update edit rebuild new skip advance jump teleport force win lose kill damage heal give grant " +
+    "unlock complete finish play enter exit leave drop collect craft attack cast send save load login logout " +
+    "register checkout pay purchase confirm accept reject approve cancel dismiss navigate visit spend install " +
+    "uninstall burn repair arrive depart fly hit begin invest upgrade downgrade clear repel record end mount " +
+    "unmount dismantle offer assign hire fire eat drink rest sleep wake board land dock undock attach detach " +
+    "rename sort reorder import export upload download share invite join quit"
+  ).split(" "),
+);
+
+/** Leading words that namespace an action: prepPlaceRoom, uiClickButton, debugSetStage. */
+const NAMESPACE_WORDS = new Set(["prep", "ui", "dev", "debug", "test", "game", "app", "player", "admin", "do", "cmd"]);
+
+/** Verbs that only count after a namespace word (alone they are usually nouns: linkBonuses, overdriveState). */
+const NAMESPACED_VERBS = new Set(["link", "unlink", "overdrive", "depart"]);
+
+/** Trailing words that make a name a lookup: linkBonusFor, levelOf, moraleOf. */
+const LOOKUP_TAIL = new Set(["for", "of", "by", "at", "in", "on"]);
+
+/**
+ * Test hooks that set conditions rather than perform the user's actions — allowed even in
+ * a journey: a fixed seed, slowed time, invincibility, feature flags, a fresh start, an
+ * enemy to test against. They make a scripted run deterministic; they do not skip the flow.
+ */
+const CONDITION_CALL =
+  /^(?:(?:set|enable|disable|toggle|use|with|freeze|unfreeze|pause|resume)[_A-Z]?)?(?:seed|rng|random|time|timescale|speed|clock|now|feature|features|flag|flags|godmode|invincib|immortal|cheat|difficulty)|^(?:reset|spawn|mock|stub|seed)/i;
+
+/** DOM/browser functions reachable through window — not the app's own surface. */
+const BROWSER_FUNCS = /^(?:getComputedStyle|requestAnimationFrame|cancelAnimationFrame|setTimeout|setInterval|clearTimeout|clearInterval|matchMedia|getSelection|fetch|atob|btoa|structuredClone|queueMicrotask|alert|confirm|prompt|open|close|focus|blur|print|postMessage|scroll\w*|dispatchEvent|addEventListener|removeEventListener)$/;
+
+export type AppCallKind = "read" | "condition" | "action";
+
+function camelWords(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[\s_$]+/)
+    .filter(Boolean)
+    .map((w) => w.toLowerCase());
+}
+
+export function classifyAppCall(name: string): AppCallKind {
+  if (CONDITION_CALL.test(name)) return "condition";
+  const words = camelWords(name);
+  if (words.length > 1 && LOOKUP_TAIL.has(words[words.length - 1]!)) return "read";
+  if (ACTION_VERBS.has(words[0]!)) return "action";
+  if (words.length > 1 && NAMESPACE_WORDS.has(words[0]!) && (ACTION_VERBS.has(words[1]!) || NAMESPACED_VERBS.has(words[1]!))) return "action";
+  return "read";
+}
+
+/** Calls to the app's own functions inside page.evaluate bodies: window.__game.chartTo(…), __app.save(). */
+export function appCalls(text: string): Array<{ name: string; kind: AppCallKind }> {
+  const out: Array<{ name: string; kind: AppCallKind }> = [];
+  for (const raw of evaluateBodies(text)) {
+    const body = stripStrings(raw);
+    const re = /\b(?:(?:window|globalThis|self)\s*\.\s*([\w$]+(?:\s*\.\s*[\w$]+)*)|(__[\w$]+(?:\s*\.\s*[\w$]+)*))\s*\(/g;
+    for (const m of body.matchAll(re)) {
+      const chain = (m[1] ?? m[2]!).replace(/\s+/g, "");
+      const name = chain.split(".").pop()!;
+      if (!m[2] && chain.split(".").length === 1 && BROWSER_FUNCS.test(name)) continue; // window.getComputedStyle(…)
+      out.push({ name, kind: classifyAppCall(name) });
+    }
+  }
+  return out;
+}
+
+/** Real user input outside page.evaluate: clicks, keys, typing, taps, drags. */
+const REAL_INPUT =
+  /page\.(?:mouse|keyboard|touchscreen)\.\w+\s*\(|\.(?:click|dblclick|fill|press|pressSequentially|type|check|uncheck|selectOption|tap|dragTo|hover|setInputFiles)\s*\(/g;
+
+export function realInputCount(text: string): number {
+  let rest = text;
+  for (const body of evaluateBodies(text)) rest = rest.replace(body, "");
+  return (rest.match(REAL_INPUT) ?? []).length;
+}
+
+/** A @journey spec: the main thing a user comes to do, start to finish, through real input. */
+export function isJourneySpec(text: string): boolean {
+  return /test(?:\.\w+)?\s*\(\s*["'`][^"'`]*@journey\b/.test(text);
+}
+
 export interface SpecScanOptions {
   /** Project renders its UI into a canvas (e.g. Flutter web): apply canvas rules to every spec. */
   canvasProject?: boolean;
@@ -185,6 +271,28 @@ export function scanSpecFileContent(rel: string, text: string, options: SpecScan
       message:
         "page.evaluate changes the page (assigns, clicks, dispatches or stores) — that skips the user flow. " +
         "Use real clicks/typing instead. Reading values with page.evaluate is fine.",
+    });
+  }
+
+  // Back doors: the app's own action functions instead of its UI. Setup through test hooks
+  // (seed, time, flags, spawn) is fine; performing the user's actions that way is not.
+  const calls = appCalls(text);
+  const actions = [...new Set(calls.filter((c) => c.kind === "action").map((c) => `${c.name}()`))];
+  if (isJourneySpec(text) && actions.length > 0) {
+    warnings.push({
+      file: rel,
+      blocking: true,
+      message:
+        `@journey spec performs user actions through the app's own functions (${actions.slice(0, 5).join(", ")}) — ` +
+        "a journey must reach every step with real input (clicks, keys, typing). Test hooks may only set conditions: seed, time scale, flags, spawn, reset.",
+    });
+  } else if (actions.length > 0 && realInputCount(text) === 0) {
+    warnings.push({
+      file: rel,
+      blocking: true,
+      message:
+        `Spec drives the app only through its own functions (${actions.slice(0, 5).join(", ")}) and never uses its UI — ` +
+        "it proves the logic, not that a person can do it. Do the user's actions with real clicks/keys; keep hooks for setup (seed, flags, spawn) and reads.",
     });
   }
 
@@ -258,6 +366,20 @@ export function scanSpecPatterns(cwd: string, config: ScenariosConfig): SpecPatt
   });
 
   return warnings;
+}
+
+/** Spec files (repo-relative) with a @journey test. */
+export function findJourneySpecs(cwd: string, config: ScenariosConfig): string[] {
+  const out: string[] = [];
+  walkSpecs(path.join(cwd, config.scenariosDir), (abs, name) => {
+    if (isScratchSpecFile(name)) return;
+    try {
+      if (isJourneySpec(fs.readFileSync(abs, "utf8"))) out.push(path.relative(cwd, abs).split(path.sep).join("/"));
+    } catch {
+      /* unreadable: not a journey */
+    }
+  });
+  return out;
 }
 
 export function formatSpecPatternWarnings(warnings: SpecPatternWarning[]): string[] {

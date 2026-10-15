@@ -30,8 +30,12 @@ export interface BlueprintItem {
   line: number;
 }
 
+export type BlueprintBar = "product" | "spec";
+
 export interface ParsedBlueprint {
   goal: string;
+  /** From the `Bar: product|spec` line; null when the line is missing. */
+  bar: BlueprintBar | null;
   items: BlueprintItem[];
   /** Lines that name an id but are not a valid item line (fixable by the model). */
   malformed: Array<{ line: number; text: string; why: string }>;
@@ -65,9 +69,12 @@ export function parseBlueprint(text: string): ParsedBlueprint {
   const malformed: ParsedBlueprint["malformed"] = [];
   let tier: Tier | null = null;
   let goal = "";
+  let bar: BlueprintBar | null = null;
   lines.forEach((raw, i) => {
     const goalMatch = raw.match(/^\s*Goal\s*:\s*(.+)$/i);
     if (goalMatch && !goal) goal = goalMatch[1]!.trim();
+    const barMatch = raw.match(/^\s*Bar\s*:\s*(product|spec)\b/i);
+    if (barMatch && !bar) bar = barMatch[1]!.toLowerCase() as BlueprintBar;
     const tierMatch = raw.match(TIER_RE);
     if (tierMatch) {
       tier = tierMatch[1]!.toLowerCase() as Tier;
@@ -91,7 +98,7 @@ export function parseBlueprint(text: string): ParsedBlueprint {
     const { title, fields } = splitFields(m[3]!);
     items.push({ id, mark: normMark(m[2]!), tier, title, proves: fields.proves ?? "", fields, line: i });
   });
-  return { goal, items, malformed };
+  return { goal, bar, items, malformed };
 }
 
 export function readBlueprint(cwd: string, rel: string): { text: string; parsed: ParsedBlueprint } | null {
@@ -150,6 +157,9 @@ const PROVES_RE = /^(verify|manual|[\w./\\-]+\.(spec\.ts|test\.py|test\.ts))$/i;
 export function checkBlueprint(parsed: ParsedBlueprint): string[] {
   const problems: string[] = [];
   if (!parsed.goal) problems.push("No `Goal: …` line — state in one line what is being built.");
+  if (!parsed.bar) {
+    problems.push("No `Bar: product` or `Bar: spec` line — product: a person can use everything (gaps filled, each item says how the user does it); spec: only what is written.");
+  }
   const v1 = parsed.items.filter((i) => i.tier === "v1");
   if (parsed.items.length === 0) problems.push("No items. Items look like `- [ ] **R-01** What it does, checkably · proves: thing.spec.ts` under `## v1`.");
   else if (v1.length === 0) problems.push("`## v1` has no items — v1 is the smallest usable version and is built first.");
@@ -160,6 +170,9 @@ export function checkBlueprint(parsed: ParsedBlueprint): string[] {
     if (it.tier === null) problems.push(`${it.id}: not under a \`## v1\` / \`## v2\` / \`## later\` heading.`);
     if (!it.proves) problems.push(`${it.id}: missing \`· proves: <spec>.spec.ts | verify | manual\`.`);
     else if (!PROVES_RE.test(it.proves)) problems.push(`${it.id}: proves "${it.proves}" — use a spec file name, \`verify\`, or \`manual\`.`);
+    if (parsed.bar === "product" && it.proves && !/^(verify|manual)$/i.test(it.proves) && !it.fields.input) {
+      problems.push(`${it.id}: product bar — say how the user does it: \`· input: <e.g. click a node on the map>\`. Its spec must do exactly that.`);
+    }
     if (it.title.replace(/[^a-z0-9]/gi, "").length < 12) {
       problems.push(`${it.id}: "${it.title}" is too thin — say what it does in checkable terms (inputs, limits, visible result).`);
     }

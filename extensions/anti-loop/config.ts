@@ -22,7 +22,12 @@ export interface AntiLoopConfig {
   recoverGhostToolCalls: boolean;
   /** User-help mode: /stuck, interrupt, last recovery, hard-stop handoff. */
   userHelp: boolean;
-  /** Unique tool fingerprints with no edits before a "looks stuck" notify. 0 disables. */
+  /**
+   * Fruitless calls (errors, no-match greps, empty output) with no edit before a "looks
+   * stuck" notify. Reading code that finds things is exploring, not thrashing. 0 disables.
+   */
+  churnNotifyAfterFruitless: number;
+  /** Backstop: different calls with no edit at all before the notify, however productive. 0 disables. */
   churnNotifyAfterUniqueTools: number;
 }
 
@@ -36,7 +41,8 @@ export const DEFAULT_CONFIG: AntiLoopConfig = {
   thinkingLoopMinRepeats: 3,
   recoverGhostToolCalls: true,
   userHelp: true,
-  churnNotifyAfterUniqueTools: 6,
+  churnNotifyAfterFruitless: 5,
+  churnNotifyAfterUniqueTools: 30,
 };
 
 function readJson(file: string): Partial<AntiLoopConfig> | null {
