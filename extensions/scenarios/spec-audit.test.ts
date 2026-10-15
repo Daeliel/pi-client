@@ -42,7 +42,7 @@ describe("spec-audit", () => {
     assert.ok(hasBlockingSpecWarnings(scanSpecFileContent("h.spec.ts", dom, { canvasProject: true })));
   });
 
-  it("only hints at scrolling for list/bottom words in a fixed-size canvas game", () => {
+  it("says nothing about scrolling for list/bottom words in a fixed-size canvas game", () => {
     const game = `import { clickCanvas } from "./helpers/canvas-interaction";
       test("Q and E cycle the room type list", async ({ page }) => {
         await page.mouse.click(480, 320);
@@ -50,9 +50,30 @@ describe("spec-audit", () => {
         // the type label sits at the bottom of the canvas
         await expect(page.locator("canvas")).toBeVisible();
       });`;
-    const w = scanSpecFileContent("type-cycle.spec.ts", game);
-    assert.equal(hasBlockingSpecWarnings(w), false, JSON.stringify(w));
-    assert.ok(w.some((x) => /does not scroll/.test(x.message)));
+    assert.deepEqual(scanSpecFileContent("type-cycle.spec.ts", game), [], "no warning, not even a hint");
+  });
+
+  it("page.evaluate: reads with locals pass, writes to page/app state are caught (aliases too)", () => {
+    const evalSpec = (body: string) => `test("t", async ({ page }) => { await page.evaluate(${body}); });`;
+    for (const read of [
+      `() => window.__game.state()`,
+      `() => { const s = window.__game.state(); return s.stage; }`,
+      `() => { const out = []; for (const e of document.querySelectorAll('li')) out.push(e.textContent); return out; }`,
+      `() => { let n = 0; for (let i = 0; i < 5; i++) n += i; return n; }`,
+      `() => { const { stage, hp } = window.__game.state(); return stage === "travel" && hp >= 3; }`,
+      `(sel) => document.querySelector(sel)?.textContent === "x = 1"`,
+    ]) {
+      assert.ok(!hasBlockingSpecWarnings(scanSpecFileContent("r.spec.ts", evalSpec(read))), read);
+    }
+    for (const write of [
+      `() => { score = 10; }`,
+      `() => window.__game.enemies.push({})`,
+      `() => window.__game.lives++`,
+      `() => { document.body.innerHTML = "" }`,
+      `() => { const g = window.__game; g.stage = "travel"; }`,
+    ]) {
+      assert.ok(hasBlockingSpecWarnings(scanSpecFileContent("w.spec.ts", evalSpec(write))), write);
+    }
   });
 
   it("allows read-only page.evaluate but blocks state changes", () => {

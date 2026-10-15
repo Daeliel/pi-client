@@ -52,9 +52,74 @@ function walkSpecs(dir: string, visit: (abs: string, relFromDir: string) => void
 /** Spec drives a canvas (Flutter web, games): DOM locators cannot see inside it. */
 const CANVAS_SPEC = /canvas|canvas-interaction|mouse\.(?:click|wheel|move|down)/i;
 
-/** Things inside page.evaluate that change the page instead of reading it. */
-const EVAL_WRITE =
-  /(?:^|[^=!<>])=(?![=>])|\+\+|--|\.click\s*\(|dispatchEvent|setItem|removeItem|\.push\s*\(|\.splice\s*\(|innerHTML|textContent\s*=|\.value\s*=|\.focus\s*\(|submit\s*\(/;
+/** Calls that change the page whatever they are called on. */
+const EVAL_MUTATING_CALL = /\.click\s*\(|dispatchEvent\s*\(|\.(?:setItem|removeItem)\s*\(|\.focus\s*\(|\.(?:submit|requestSubmit)\s*\(/;
+
+/** Array/collection mutators — a write only when the receiver is page/app state, not a local. */
+const EVAL_MUTATOR = /([A-Za-z_$][\w$]*)[\w$.\s]*?\.(?:push|pop|shift|unshift|splice|sort|reverse|fill)\s*\(/g;
+
+/** `lhs op= …` (not `==`, `=>`); lhs is a name or a member/index chain. */
+const EVAL_ASSIGN =
+  /(^|[^\w$.\s]|\b(?:const|let|var)\s+|\s)([A-Za-z_$][\w$]*(?:\s*(?:\.\s*[\w$]+|\[[^\]]*\]))*)\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|\?\?|&&|\|\|)?=(?![=>])/g;
+
+const EVAL_INCDEC = /(?:([A-Za-z_$][\w$]*)[\w$.\[\]]*\s*(?:\+\+|--))|(?:(?:\+\+|--)\s*([A-Za-z_$][\w$]*))/g;
+
+/** Blank out string and template literal contents so words in them are not code. */
+function stripStrings(code: string): string {
+  return code.replace(/(["'`])(?:\\.|(?!\1)[^\\])*\1/g, (s) => s[0] + s[0]);
+}
+
+/** Names the evaluate body declares itself (const/let/var, arrow params): local bookkeeping. */
+function localNames(body: string): Set<string> {
+  const names = new Set<string>();
+  const add = (list: string | undefined) => {
+    for (const n of list?.match(/[A-Za-z_$][\w$]*/g) ?? []) names.add(n);
+  };
+  for (const m of body.matchAll(/\b(?:const|let|var)\s+([^=;]+?)\s*(?:=|\bof\b|\bin\b)/g)) add(m[1]);
+  add((body.match(/^\s*(?:async\s*)?\(([^)]*)\)\s*=>/) ?? body.match(/^\s*(?:async\s+)?([A-Za-z_$][\w$]*)\s*=>/))?.[1]);
+  add(body.match(/^\s*(?:async\s+)?function\s*[\w$]*\s*\(([^)]*)\)/)?.[1]);
+  return names;
+}
+
+/**
+ * Locals the body creates itself (`= []`, `= {}`, `= new …`, a literal). Changing their
+ * properties is bookkeeping; changing properties of a local that *aliases* page state
+ * (`const g = window.__game; g.stage = …`) is a write.
+ */
+function freshLocals(body: string): Set<string> {
+  const names = new Set<string>();
+  for (const m of body.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(\[|\{|new\s|["'`\d-])/g)) names.add(m[1]!);
+  return names;
+}
+
+/**
+ * True when a page.evaluate body changes the page or app state (assigns to globals or
+ * DOM/app properties, clicks, dispatches, stores, mutates app arrays). Reading — even
+ * with local variables and helper arrays — is fine.
+ */
+export function evaluateWrites(rawBody: string): boolean {
+  const body = stripStrings(rawBody);
+  if (EVAL_MUTATING_CALL.test(body)) return true;
+  const locals = localNames(body);
+  const fresh = freshLocals(body);
+  // A bare local may be reassigned; a member of one only if the body created it.
+  const allowed = (target: string) => {
+    const root = target.match(/^[A-Za-z_$][\w$]*/)![0];
+    return /^[A-Za-z_$][\w$]*$/.test(target.trim()) ? locals.has(root) : fresh.has(root);
+  };
+  for (const m of body.matchAll(EVAL_ASSIGN)) {
+    if (/\b(?:const|let|var)\s+$/.test(m[1]!)) continue; // a declaration
+    if (!allowed(m[2]!)) return true;
+  }
+  for (const m of body.matchAll(EVAL_INCDEC)) {
+    const target = m[0].replace(/\+\+|--/g, "").trim();
+    if (!allowed(target)) return true;
+  }
+  for (const m of body.matchAll(EVAL_MUTATOR)) {
+    if (!fresh.has(m[1]!)) return true;
+  }
+  return false;
+}
 
 /** Bodies of every page.evaluate(...) call (paren-matched, strings ignored). */
 export function evaluateBodies(text: string): string[] {
@@ -113,7 +178,7 @@ export function scanSpecFileContent(rel: string, text: string, options: SpecScan
   }
 
   const evalBodies = evaluateBodies(text);
-  if (evalBodies.some((b) => EVAL_WRITE.test(b))) {
+  if (evalBodies.some(evaluateWrites)) {
     warnings.push({
       file: rel,
       blocking: true,
@@ -125,14 +190,15 @@ export function scanSpecFileContent(rel: string, text: string, options: SpecScan
 
   if (!canvas) return warnings;
 
-  if ((scrollIntent || mentionsBelow) && !hasScroll) {
-    const blocking = scrollIntent || Boolean(options.canvasProject);
+  // Only when scrolling can matter: the spec says so, or the project is a scrolling canvas
+  // app (Flutter). On a fixed-size canvas game, words like "list" or "bottom" are game
+  // words — a hint there fires on every spec and can never be satisfied.
+  if ((scrollIntent || (mentionsBelow && options.canvasProject)) && !hasScroll) {
     warnings.push({
       file: rel,
-      blocking,
-      message: blocking
-        ? "Canvas spec mentions below-fold content but never scrolls — import scrollAndCapture or scrollCanvasWheel/scrollCanvasDrag from ./helpers/canvas-interaction (in THIS project, not pi-client templates)."
-        : "Canvas spec mentions list/bottom-style content but never scrolls. If that content is below the fold, scroll with ./helpers/canvas-interaction; if the canvas does not scroll (fixed-size game), ignore this.",
+      blocking: true,
+      message:
+        "Canvas spec mentions below-fold content but never scrolls — import scrollAndCapture or scrollCanvasWheel/scrollCanvasDrag from ./helpers/canvas-interaction (in THIS project, not pi-client templates).",
     });
   }
 

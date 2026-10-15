@@ -23,8 +23,9 @@ export const WEB_TOOLING_CORE = `
 export const WEB_LANE_DETAILS = `
 ## Lane A / B details
 
-- Web specs must use real UI actions (click/tap/key). Forbidden: localStorage / page.evaluate to fake the flow.
+- Web specs must use real UI actions (click/tap/key). Forbidden: localStorage / page.evaluate to fake the flow. Reading state with page.evaluate (\`window.__game.state()\`) is fine.
 - Screenshots: prefer inside the Playwright spec (same browser as clicks). Blank/white capture = failure.
+- **How a screen looks** (colours, overlays, opacity, layout) is not proven by clicks. Save a screenshot of that screen to \`.pi/scenarios/output/<name>.png\` in a spec you keep — passing specs' screenshots there are attached for you to review. Scratch \`__*.spec.ts\` files are deleted after a green gate, so do not keep visual checks in them.
 - capture_page_screenshot cannot scroll — use helpers/canvas-interaction in the spec for below-the-fold content.
 - Layout bugs: one spec with before/after screenshots → run_scenarios (load visual-ui-debug skill). Do not code-read in a loop.
 - Optional scaffold_scenario helps start a spec; freeform specs are fine when you write solid tests yourself.

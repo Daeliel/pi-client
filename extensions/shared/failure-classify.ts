@@ -66,7 +66,11 @@ export function classifyScenarioFailure(input: {
     };
   }
 
-  if (input.weakSpecBlocking || /WEAK SPEC PATTERNS|spec proof is too weak/i.test(blob)) {
+  // weak_spec means "the specs passed but their proof is too weak". A real failing spec
+  // is the cause to fix first, so it gets its own label even when weak patterns are also
+  // listed. (The WEAK SPEC PATTERNS header alone is not a signal: hints print it too.)
+  const testsFailed = /\[FAIL\]/.test(input.report);
+  if (!testsFailed && (input.weakSpecBlocking || /spec proof is too weak/i.test(blob))) {
     return {
       label: "weak_spec",
       evidence:

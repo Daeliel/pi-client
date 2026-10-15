@@ -117,6 +117,26 @@ function isMultiProjectWorkspace(cwd: string): boolean {
   }
 }
 
+const PROJECT_MARKERS = ["package.json", "pyproject.toml", "pytest.ini", "setup.py", "go.mod", "Cargo.toml", "pubspec.yaml"];
+
+function isProjectDir(dir: string): boolean {
+  if (PROJECT_MARKERS.some((m) => fileExists(dir, m))) return true;
+  try {
+    return fs.readdirSync(dir).some((f) => /\.(csproj|sln)$/i.test(f));
+  } catch {
+    return false;
+  }
+}
+
+/** Walk up from `dir` to `root`; the first project folder wins, else the root itself. */
+function nearestProjectDir(dir: string, root: string): string {
+  for (let d = dir; ; d = path.dirname(d)) {
+    const rel = path.relative(root, d);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) return root;
+    if (rel === "" || isProjectDir(d)) return d;
+  }
+}
+
 interface WorkScope {
   cwd: string;
   relFiles: string[];
@@ -148,9 +168,10 @@ export function partitionScopes(piCwd: string, files: string[], isolate: boolean
       buckets.get(key)!.push(rel || path.basename(abs));
       continue;
     }
-    const parts = rel.split(path.sep);
-    const scopeDir = parts.length > 1 ? path.join(root, parts[0]) : root;
-    const scopeRel = parts.length > 1 ? parts.slice(1).join(path.sep) : rel;
+    // The file belongs to the nearest folder above it that is a project — not to its
+    // first path segment: src/main.ts in a root package.json project is the root's.
+    const scopeDir = nearestProjectDir(path.dirname(abs), root);
+    const scopeRel = path.relative(scopeDir, abs);
     if (!buckets.has(scopeDir)) buckets.set(scopeDir, []);
     buckets.get(scopeDir)!.push(scopeRel.split(path.sep).join("/"));
   }

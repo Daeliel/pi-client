@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DEFAULT_CONFIG } from "./config";
-import { allSkippedForMissingTools, isPlaceholderTestScript, verify } from "./engine";
+import { allSkippedForMissingTools, isPlaceholderTestScript, partitionScopes, verify } from "./engine";
 
 function tempProject(files: Record<string, string>): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "verify-engine-"));
@@ -60,6 +60,41 @@ describe("verify engine", () => {
       assert.match(formatReport(result), /SUMMARY: 1 failed/);
     } finally {
       fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("verify scopes", () => {
+  function tree(files: Record<string, string>): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "verify-scopes-"));
+    for (const [rel, content] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+      fs.writeFileSync(path.join(dir, rel), content);
+    }
+    return dir;
+  }
+  const summary = (dir: string, files: string[]) =>
+    partitionScopes(dir, files, true).map((s) => `${s.label || "(root)"}: ${s.relFiles.join(",")}`);
+
+  it("a file in src/ of a root package.json project is verified at the root", () => {
+    const dir = tree({ "package.json": "{}", "src/main.ts": "", "src/ui/hud.ts": "" });
+    try {
+      assert.deepEqual(summary(dir, ["src/main.ts", "src/ui/hud.ts"]), ["(root): src/main.ts,src/ui/hud.ts"]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("real subprojects keep their own scope; loose files fall back to the root", () => {
+    const dir = tree({ "app-a/package.json": "{}", "app-a/src/x.ts": "", "app-b/pyproject.toml": "", "app-b/y.py": "", "notes/todo.ts": "" });
+    try {
+      assert.deepEqual(summary(dir, ["app-a/src/x.ts", "app-b/y.py", "notes/todo.ts"]).sort(), [
+        "(root): notes/todo.ts",
+        "app-a/: src/x.ts",
+        "app-b/: y.py",
+      ]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });

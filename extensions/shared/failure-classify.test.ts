@@ -32,6 +32,17 @@ describe("failure-classify", () => {
     assert.equal(c.label, "weak_spec");
   });
 
+  it("a real failing spec beats weak-spec warnings listed in the same report", () => {
+    const c = classifyScenarioFailure({
+      report:
+        "[FAIL] train: board the train — .pi/scenarios/train.spec.ts (exit 1)\nError: expect(received).toBe(expected)\nExpected: \"travel\"\n\n" +
+        "WEAK SPEC PATTERNS (fix before trusting pass):\n  - [BLOCKING] .pi/scenarios/stages.spec.ts",
+      weakSpecBlocking: true,
+    });
+    assert.equal(c.label, "assert_fail");
+    assert.match(c.evidence, /expect/i);
+  });
+
   it("labels missing test files", () => {
     const c = classifyScenarioFailure({
       report: "Missing test files",
