@@ -8,11 +8,12 @@
  * but NOT before_agent_start. Resetting only on before_agent_start left the claim set
  * for the whole chain, so after the first fix follow-up no gate ever fired again.
  *
- * Expected package.json order: verify → scenarios → browser-console → polish.
- * "polish" only claims when nothing else did (all gates green), so it is always last.
+ * Expected package.json order: verify → scenarios → browser-console → polish → expand → autopilot.
+ * "polish" only claims when the checking gates are green; "autopilot" only when every
+ * other gate is quiet, so it is always last.
  */
 
-export type GateLane = "verify" | "scenarios" | "browser" | "qa" | "polish" | "expand";
+export type GateLane = "verify" | "scenarios" | "browser" | "qa" | "polish" | "expand" | "autopilot";
 
 /**
  * pi loads every extension through its own jiti instance with moduleCache off, so a

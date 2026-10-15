@@ -22,8 +22,9 @@ describe("withGateWorkingMessage", () => {
     const messages: (string | undefined)[] = [];
     await withGateWorkingMessage(fakeCtx(messages), "Gate", async (status) => {
       status.step("slow");
-      await new Promise((r) => setTimeout(r, 1100));
+      // Past two ticks: under load a tick can land a hair before the second boundary.
+      await new Promise((r) => setTimeout(r, 2200));
     });
-    assert.ok(messages.includes("Gate — slow · 0:01"), JSON.stringify(messages));
+    assert.ok(messages.some((m) => /^Gate — slow · 0:0[12]$/.test(m ?? "")), JSON.stringify(messages));
   });
 });

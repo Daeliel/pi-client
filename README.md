@@ -17,7 +17,7 @@ Any OpenAI-compatible server works; those two are simply what the guardrails are
 
 ## What's in the box
 
-Eleven Pi extensions, three skills, four prompt templates, and a config layering system.
+Twelve Pi extensions, three skills, four prompt templates, and a config layering system.
 
 ### Extensions
 
@@ -32,6 +32,7 @@ Eleven Pi extensions, three skills, four prompt templates, and a config layering
 | **release** | Flutter Android release lane: `release_doctor` (toolchain preflight) and `release_build` (APK/AAB with artifact verification). `/release doctor`, `/release build apk` |
 | **polish** | Asks "is it good?" where the gates ask "is it broken?". A level knob (`off` / `basic` / `standard` / `showcase` / `ultimate`, or `auto`) decides how many "name the three weakest things and fix them" passes each UI surface gets. Surfaces are tracked in `.pi/polish/inventory.json`; scope follows the request, and loop guards stop a surface that keeps naming the same weakness. Optional separate vision-model critic at `showcase`+. `/polish <level>`, `/polish status`, `/polish critic <provider/model>` |
 | **expand** | Polish's sibling for depth: gap analysis over what already exists (content pools, mechanics, entity types, workflows). `/expand map` records a systems map, `/expand pillars` sets design pillars, `/expand ideas` proposes ideas along four axes (`more`, `deeper`, `wider`, `tension`) that must each name the system they build on and the gap they fill. Then it stops for you to `/expand build <n>` or `/expand reject <n>`. Builds end with a fit check (reachable, explained, integrated, sane numbers). State lives in `.pi/expand/ledger.json`. |
+| **autopilot** | Carries a build through to completion without you saying "continue". `/blueprint <what to build>` writes a **blueprint** — goal, tiers (`v1` smallest usable version, then `v2`, `later`), one checkable item per line naming what proves it (a spec, `verify`, or `manual`) — from your prompt, a design doc, your images, or image search. When you ask for the whole thing, the model calls `start_autopilot`; you approve once (scope, optional time budget that shapes the plan), then it builds item by item. An item is done only when its evidence passes; failing items are retried, then marked blocked so the run moves on; questions become recorded assumptions; an early "done" is checked. Status marks are set by the extension from evidence, never by hand. With git, each item is a commit on an `autopilot/<goal>` branch (`/autopilot rollback <id>`). `/autopilot pause\|resume\|status\|off` |
 | **once** | One-shot modifiers for a single prompt: `/once <modifier> [<modifier> ...] <prompt>`. Polish registers its levels, expand its axes; other extensions can register more via `extensions/shared/once.ts`. `/once` alone lists what is available. |
 | **vision-relay** | Lets text-only session models "see". When the session model has no image input, screenshots and pasted images go to a separate vision model and the session gets its description instead. Models declaring `input: ["text", "image"]` still get images attached directly. `/vision status`, `/vision model <provider/id>`, `/vision off` |
 

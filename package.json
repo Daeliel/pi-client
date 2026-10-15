@@ -31,6 +31,7 @@
       "./extensions/release",
       "./extensions/polish",
       "./extensions/expand",
+      "./extensions/autopilot",
       "./extensions/once",
       "./extensions/vision-relay"
     ],

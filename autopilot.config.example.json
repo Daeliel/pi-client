@@ -1,0 +1,12 @@
+{
+  "_comment": "Copy to .pi/autopilot.config.json in a project (or ~/.pi/autopilot.config.json globally). The plan and its progress live in blueprintPath; run settings in .pi/blueprint/run.json. /autopilot off project writes enabled:false; declining git init writes checkpoints:false.",
+  "enabled": true,
+  "headless": "deny",
+  "itemAttempts": 3,
+  "stallStops": 3,
+  "defaultScope": "v1",
+  "budgetCeiling": 1.5,
+  "checkpoints": true,
+  "blueprintPath": ".pi/blueprint/BLUEPRINT.md",
+  "refsDir": ".pi/blueprint/refs"
+}
