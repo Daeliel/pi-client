@@ -1,11 +1,9 @@
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
 import { clipMiddle, plainOutputEnv, stripAnsi } from "../shared/output";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { VerifyConfig, LanguageConfig } from "./config";
+import { runCommand } from "../shared/run-command";
 
-const pexec = promisify(exec);
 
 export type CheckKind = "lint" | "build" | "test";
 
@@ -37,28 +35,10 @@ async function run(
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<RunOutput> {
-  if (signal?.aborted) return { code: 0, out: "", timedOut: false, aborted: true };
-  try {
-    const { stdout, stderr } = await pexec(command, {
-      cwd,
-      timeout: timeoutMs,
-      windowsHide: true,
-      maxBuffer: 16 * 1024 * 1024,
-      signal,
-      env: plainOutputEnv(),
-    });
-    return { code: 0, out: stripAnsi(`${stdout}${stderr}`).trim(), timedOut: false, aborted: false };
-  } catch (e: unknown) {
-    const err = e as { stdout?: string; stderr?: string; code?: number; killed?: boolean; signal?: string; name?: string; message?: string };
-    // User pressed Esc / the turn was cancelled — not a real failure.
-    if (err.name === "AbortError" || signal?.aborted) {
-      return { code: 0, out: "", timedOut: false, aborted: true };
-    }
-    const out = stripAnsi(`${err.stdout ?? ""}${err.stderr ?? ""}`).trim() || err.message || "unknown error";
-    const timedOut = Boolean(err.killed) || err.signal === "SIGTERM";
-    const code = typeof err.code === "number" ? err.code : 1;
-    return { code: timedOut ? 124 : code, out, timedOut, aborted: false };
-  }
+  // Esc / a cancelled turn comes back as aborted — not a real failure. The whole process
+  // tree is stopped, not just the shell.
+  const r = await runCommand(command, { cwd, timeoutMs, signal, env: plainOutputEnv() });
+  return { ...r, out: stripAnsi(r.out) };
 }
 
 /** True if a probe command (e.g. "ruff --version") exits 0. Results are cached per probe. */

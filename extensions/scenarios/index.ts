@@ -66,6 +66,8 @@ import { extractEditPath, isCodePath, isEditTool } from "../shared/edit-tools";
 import { classifyScenarioFailure, formatClassifiedFailure } from "../shared/failure-classify";
 import { detectStacks, formatStackDoctorLines, shouldInjectWebProcedure } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
+import { registerSkipHandler, skipAwareSignal, skipMark, skippedSince } from "../shared/gate-skip";
+import { buildSpecFromRecording, PlaySession, validateActions, type PlayAction, type StepResult } from "./play";
 import { syncOwnedTools } from "../shared/tool-activation";
 import { attemptNotes, giveUpNote, RepeatTracker } from "../shared/gate-messages";
 
@@ -74,6 +76,8 @@ const TOOLS = [
   "define_scenarios",
   "run_scenarios",
   "capture_page_screenshot",
+  "play",
+  "play_save_spec",
   "confirm_visual_qa",
   "scenarios_housekeep",
   "list_scenarios",
@@ -138,6 +142,8 @@ export default function (pi: ExtensionAPI) {
   /** The review prompt's run is in progress; its agent_end closes the review. */
   let reviewRunning = false;
   let configCache: ScenariosConfig | null = null;
+  /** Play mode session (one at a time; ends with the run). */
+  let play: PlaySession | null = null;
 
   function cfg(ctx: ExtensionContext): ScenariosConfig {
     if (!configCache) configCache = loadConfig(ctx.cwd);
@@ -183,6 +189,25 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
+  // /skip: QA is asked before scenarios (gate-skip lane order), while the changed files
+  // that arm it are still known.
+  registerSkipHandler("qa", () => {
+    if (!configCache || !shouldRunQaGate(configCache)) return null;
+    visualQaConfirmed = true;
+    qaFixAttempts = 0;
+    persist();
+    return "pending screenshot review";
+  });
+  registerSkipHandler("scenarios", () => {
+    if (changedFiles.size === 0) return null;
+    const what = `${changedFiles.size} changed file(s)`;
+    changedFiles.clear();
+    fixAttempts = 0;
+    repeats.reset();
+    persist();
+    return what;
+  });
+
   function recordRunResults(result: Awaited<ReturnType<typeof runScenarios>>, ran: ScenarioDefinition[]) {
     for (const c of result.checks) {
       lastRunById[c.scenarioId] = c.status;
@@ -207,7 +232,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     const wanted = ["scaffold_scenario", "define_scenarios", "run_scenarios"];
-    if (shouldInjectWebProcedure(ctx.cwd, changedFiles)) wanted.push("capture_page_screenshot");
+    if (shouldInjectWebProcedure(ctx.cwd, changedFiles)) wanted.push("capture_page_screenshot", "play", "play_save_spec");
     if (qaMode(config) === "model") wanted.push("confirm_visual_qa");
     if (activeReview) wanted.push("propose_scenario_cleanup");
     syncOwnedTools(pi, TOOLS, wanted);
@@ -260,7 +285,13 @@ export default function (pi: ExtensionAPI) {
     };
   });
 
+  // Play sessions end when the run does: a browser and dev server are not left behind.
+  pi.on("session_shutdown", async () => {
+    play?.stop();
+  });
+
   pi.on("agent_settled", async (_event, ctx) => {
+    play?.stop();
     if (!reviewDue || activeReview) return;
     const due = reviewDue;
     reviewDue = null;
@@ -497,7 +528,8 @@ export default function (pi: ExtensionAPI) {
     }
     if (isGateClaimed()) return;
 
-    await withGateWorkingMessage(ctx, "Acceptance gates (scenarios/QA) — inference idle", async (status) => {
+    await withGateWorkingMessage(ctx, "Acceptance gates (scenarios/QA) — inference idle · /skip to move on", async (status) => {
+      const mark = skipMark();
       const toRun = effectiveScenarios(ctx);
 
       if (config.requireDefined && toRun.length === 0) {
@@ -528,9 +560,10 @@ export default function (pi: ExtensionAPI) {
 
       const { run: picked, note: levelNote } = specsForLevel(ctx, toRun);
       if (picked.length > 0) {
-        const result = await runScenarios(ctx.cwd, picked, config, ctx.signal, undefined, (p) =>
+        const result = await runScenarios(ctx.cwd, picked, config, skipAwareSignal("scenarios", ctx.signal), undefined, (p) =>
           status.step(formatScenarioProgress(p)),
         );
+        if (skippedSince(mark, "scenarios")) return;
         if (ctx.signal?.aborted) return;
 
         if (result.failed) {
@@ -591,7 +624,8 @@ export default function (pi: ExtensionAPI) {
         }
 
         status.step("capturing visual QA screenshot");
-        const capture = await captureQaShot(ctx.cwd, config, ctx.signal);
+        const capture = await captureQaShot(ctx.cwd, config, skipAwareSignal("qa", ctx.signal));
+        if (skippedSince(mark, "qa")) return;
         if (ctx.signal?.aborted) return;
 
         if (!capture.ok) {
@@ -933,6 +967,147 @@ export default function (pi: ExtensionAPI) {
       return {
         content,
         details: { ok: true, path: capture.outputPath },
+      };
+    },
+  });
+
+  const PlayActionSchema = Type.Object({
+    do: Type.Union(
+      ["click", "move", "drag", "press", "hold", "type", "wheel", "wait", "goto"].map((v) => Type.Literal(v)),
+      { description: "What to do." },
+    ),
+    x: Type.Optional(Type.Number({ description: "Page x in pixels (same as the screenshot unless a scale is reported)." })),
+    y: Type.Optional(Type.Number()),
+    toX: Type.Optional(Type.Number({ description: "drag: end x" })),
+    toY: Type.Optional(Type.Number({ description: "drag: end y" })),
+    selector: Type.Optional(Type.String({ description: "click: CSS selector instead of x/y (DOM apps)." })),
+    text: Type.Optional(Type.String({ description: "click: visible text to click; type: text to type." })),
+    key: Type.Optional(Type.String({ description: "press/hold: e.g. 'E', 'ArrowLeft', 'Space', 'Control+Z'." })),
+    ms: Type.Optional(Type.Number({ description: "hold/wait: milliseconds." })),
+    dx: Type.Optional(Type.Number()),
+    dy: Type.Optional(Type.Number({ description: "wheel: scroll amount." })),
+    url: Type.Optional(Type.String({ description: "goto: path or URL." })),
+    button: Type.Optional(Type.Union([Type.Literal("left"), Type.Literal("right")])),
+    double: Type.Optional(Type.Boolean({ description: "click: double-click." })),
+  });
+
+  /** Text + screenshot for a play step; scale noted when the image was shrunk. */
+  async function playResponse(ctx: ExtensionContext, res: StepResult, header: string, config: ScenariosConfig) {
+    const vp = res.viewport;
+    const scale = vp && vp.width > config.maxImageWidth ? config.maxImageWidth / vp.width : 1;
+    const coords = vp
+      ? scale < 1
+        ? `Page is ${vp.width}×${vp.height}; the screenshot is shrunk ×${scale.toFixed(2)} — divide screenshot x/y by ${scale.toFixed(2)} for page coordinates.`
+        : `Page is ${vp.width}×${vp.height}; screenshot pixels = page coordinates.`
+      : "";
+    const lines = [
+      header,
+      res.ok ? "" : `Action failed: ${res.error}`,
+      `URL: ${res.url}${res.title ? ` · ${res.title}` : ""}`,
+      coords,
+      res.consoleErrors.length ? `Console errors since last step:\n  ${res.consoleErrors.slice(0, 5).join("\n  ")}` : "",
+    ].filter(Boolean);
+    const text = lines.join("\n");
+    if (!res.shot) return [{ type: "text" as const, text }];
+    const { images, paths } = await loadVisionImages([res.shot], config);
+    return images.length
+      ? await presentVisionToSession(ctx, text, images, paths, { checklist: false })
+      : [{ type: "text" as const, text: `${text}\n(screenshot could not be loaded)` }];
+  }
+
+  pi.registerTool({
+    name: "play",
+    label: "Play",
+    description:
+      "[Lane A — explore] Use the app like a user, one step at a time: move, click, drag, press or hold keys, type, scroll, wait — and see a screenshot after each step. " +
+      "Same Playwright browser and config as the specs. Use it to find out how the app behaves (where things are on a canvas, what a key does, how a screen looks) " +
+      "before writing a spec; then play_save_spec turns the path you found into one. Exploring is not proof — run_scenarios is.",
+    promptSnippet: "Try the app step by step with screenshots (explore)",
+    promptGuidelines: [
+      "First call with no actions (optionally url) to open the app and look; then a few actions per call, looking at each screenshot before the next.",
+      "When a path works, call play_save_spec and add assertions — do not prove a fix with play alone.",
+    ],
+    parameters: Type.Object({
+      actions: Type.Optional(Type.Array(PlayActionSchema, { description: "Done in order as one step (max 12). Omit to just look." })),
+      url: Type.Optional(Type.String({ description: "Open (or restart at) this path/URL, e.g. '/' or '/settings'." })),
+      settleMs: Type.Optional(Type.Number({ description: "Wait after the actions before the screenshot (default 300)." })),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const config = cfg(ctx);
+      const actions = (params.actions ?? []) as PlayAction[];
+      if (actions.length > 0) {
+        const problem = validateActions(actions);
+        if (problem) return { content: [{ type: "text", text: `play: ${problem}` }], details: { ok: false }, isError: true };
+      }
+      try {
+        if (!play?.running || params.url) {
+          ensureWebScaffold(ctx.cwd, config, [{ id: "play", title: "play", steps: "-", testFile: ".pi/scenarios/play", kind: "web" }]);
+          play = play ?? new PlaySession(ctx.cwd, config);
+          const first = await play.start(params.url ?? config.qaShot.urlPath ?? "/", signal);
+          if (actions.length === 0) {
+            return { content: await playResponse(ctx, first, `Play session open at ${play.startUrl} (step 0/${config.playMaxSteps}).`, config), details: { step: 0 } };
+          }
+        }
+        if (actions.length === 0) {
+          return { content: [{ type: "text", text: "Session already open — give actions, or url to restart." }], details: {} };
+        }
+        if (play.steps >= config.playMaxSteps) {
+          return {
+            content: [{ type: "text", text: `Play step limit (${config.playMaxSteps}) reached — save what you found with play_save_spec, or restart with url.` }],
+            details: { ok: false },
+            isError: true,
+          };
+        }
+        const res = await play.run(actions, Math.min(Math.max(params.settleMs ?? 300, 0), 10_000), signal);
+        return {
+          content: await playResponse(ctx, res, `Step ${play.steps}/${config.playMaxSteps}: ${res.ok ? "done" : "failed"}.`, config),
+          details: { step: play.steps, ok: res.ok },
+          isError: !res.ok,
+        };
+      } catch (e) {
+        return {
+          content: [{ type: "text", text: `Play session failed: ${(e as Error).message}\nCheck ${config.playwrightConfig} (webServer command, baseURL).` }],
+          details: { ok: false },
+          isError: true,
+        };
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "play_save_spec",
+    label: "Save Play Path as Spec",
+    description:
+      "Turn the steps that worked in the current play session into a Playwright spec under .pi/scenarios/ (replays them and screenshots the end). " +
+      "Then add the assertions it marks TODO and run_scenarios.",
+    parameters: Type.Object({
+      name: Type.String({ description: "File stem, e.g. 'travel-stage' → .pi/scenarios/travel-stage.spec.ts" }),
+      title: Type.String({ description: "Test title: the user-visible flow." }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const config = cfg(ctx);
+      if (!play || play.recorded.length === 0) {
+        return { content: [{ type: "text", text: "Nothing recorded — play some steps first (only steps that worked are kept)." }], details: { ok: false }, isError: true };
+      }
+      const stem = params.name.toLowerCase().replace(/\.spec\.ts$/, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "played-flow";
+      const rel = path.posix.join(config.scenariosDir.replace(/\\/g, "/"), `${stem}.spec.ts`);
+      const abs = path.join(ctx.cwd, rel);
+      if (fs.existsSync(abs)) {
+        return { content: [{ type: "text", text: `${rel} exists — pick another name, or add these steps to it by hand.` }], details: { ok: false }, isError: true };
+      }
+      const hasConsoleHelper = fs.existsSync(path.join(ctx.cwd, config.scenariosDir, "helpers", "console-capture.ts"));
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, buildSpecFromRecording({ name: stem, title: params.title, startUrl: play.startUrl, steps: play.recorded, hasConsoleHelper }), "utf8");
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Wrote ${rel} from ${play.recorded.length} step(s). Next: fill in its // @covers line, replace the TODO with assertions on the screen it ends on, then run_scenarios. ` +
+              "It is auto-discovered; register it with define_scenarios if this task needs it.",
+          },
+        ],
+        details: { ok: true, file: rel },
       };
     },
   });

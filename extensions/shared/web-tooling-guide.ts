@@ -25,6 +25,7 @@ export const WEB_LANE_DETAILS = `
 
 - Web specs must use real UI actions (click/tap/key). Forbidden: localStorage / page.evaluate to fake the flow. Reading state with page.evaluate (\`window.__game.state()\`) is fine.
 - Screenshots: prefer inside the Playwright spec (same browser as clicks). Blank/white capture = failure.
+- **Explore with \`play\`** before writing a spec when you do not know yet how the app behaves — where a button sits on a canvas, what a key does, what a screen shows after N steps: open it with \`play\`, do a few actions per call, look at each screenshot. When a path works, \`play_save_spec\` writes it as a spec; add the assertions and run_scenarios. Play is exploring, not proof.
 - **How a screen looks** (colours, overlays, opacity, layout) is not proven by clicks. Save a screenshot of that screen to \`.pi/scenarios/output/<name>.png\` in a spec you keep — passing specs' screenshots there are attached for you to review. Scratch \`__*.spec.ts\` files are deleted after a green gate, so do not keep visual checks in them.
 - capture_page_screenshot cannot scroll — use helpers/canvas-interaction in the spec for below-the-fold content.
 - Layout bugs: one spec with before/after screenshots → run_scenarios (load visual-ui-debug skill). Do not code-read in a loop.

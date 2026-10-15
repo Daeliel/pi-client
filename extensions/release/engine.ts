@@ -1,10 +1,9 @@
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { hasTool } from "../verify/engine";
 import { clipMiddle } from "../shared/output";
 import type { ReleaseConfig, ReleaseTargetConfig } from "./config";
+import { runCommand } from "../shared/run-command";
 import {
   androidReleaseReady,
   formatDoctorReport,
@@ -13,7 +12,6 @@ import {
   type DoctorResult,
 } from "./flutter-doctor";
 
-const pexec = promisify(exec);
 
 export interface BuildResult {
   ok: boolean;
@@ -31,33 +29,8 @@ async function run(command: string, cwd: string, timeoutMs: number, signal?: Abo
   out: string;
   timedOut: boolean;
 }> {
-  if (signal?.aborted) return { code: 0, out: "", timedOut: false };
-  try {
-    const { stdout, stderr } = await pexec(command, {
-      cwd,
-      timeout: timeoutMs,
-      windowsHide: true,
-      maxBuffer: 32 * 1024 * 1024,
-      signal,
-    });
-    return { code: 0, out: `${stdout}${stderr}`.trim(), timedOut: false };
-  } catch (e: unknown) {
-    const err = e as {
-      stdout?: string;
-      stderr?: string;
-      code?: number;
-      killed?: boolean;
-      signal?: string;
-      name?: string;
-      message?: string;
-    };
-    if (err.name === "AbortError" || signal?.aborted) {
-      return { code: 0, out: "", timedOut: false };
-    }
-    const out = `${err.stdout ?? ""}${err.stderr ?? ""}`.trim() || err.message || "unknown error";
-    const timedOut = Boolean(err.killed) || err.signal === "SIGTERM";
-    return { code: timedOut ? 124 : typeof err.code === "number" ? err.code : 1, out, timedOut };
-  }
+  const r = await runCommand(command, { cwd, timeoutMs, signal, maxOutputBytes: 32 * 1024 * 1024 });
+  return { code: r.code, out: r.out, timedOut: r.timedOut };
 }
 
 function fileExists(cwd: string, rel: string): boolean {

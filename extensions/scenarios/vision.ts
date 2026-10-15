@@ -147,17 +147,18 @@ export async function loadVisionImages(
   return { images, paths };
 }
 
-export function buildVisionMessage(intro: string, attachedPaths: string[]): string {
+/** `checklist: false` for screenshots that are not a layout review (e.g. play mode steps). */
+export function buildVisionMessage(intro: string, attachedPaths: string[], checklist = true): string {
   const lines = [intro];
   if (attachedPaths.length > 0) {
     lines.push("", "Screenshots attached:", ...attachedPaths.map((p) => `  - ${p}`));
   }
-  lines.push("", VISUAL_CHECKLIST);
+  if (checklist) lines.push("", VISUAL_CHECKLIST);
   return lines.join("\n");
 }
 
-export function buildVisionContent(intro: string, images: VisionImageContent[], attachedPaths: string[]) {
-  const text = buildVisionMessage(intro, attachedPaths);
+export function buildVisionContent(intro: string, images: VisionImageContent[], attachedPaths: string[], checklist = true) {
+  const text = buildVisionMessage(intro, attachedPaths, checklist);
   return [{ type: "text" as const, text }, ...images];
 }
 

@@ -17,6 +17,7 @@ import { resetGateClaim, tryClaimGate, isGateClaimed, registerGateReset } from "
 import { extractEditPath, isEditTool } from "../shared/edit-tools";
 import { detectStacks, shouldInjectWebProcedure } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
+import { registerSkipHandler, skipAwareSignal, skipMark, skippedSince } from "../shared/gate-skip";
 import { syncOwnedTools } from "../shared/tool-activation";
 import { attemptNotes, giveUpNote, RepeatTracker } from "../shared/gate-messages";
 
@@ -78,6 +79,16 @@ export default function (pi: ExtensionAPI) {
       fixAttempts,
     });
   }
+
+  registerSkipHandler("browser", () => {
+    if (changedWebFiles.size === 0) return null;
+    const what = `${changedWebFiles.size} changed web file(s)`;
+    changedWebFiles.clear();
+    fixAttempts = 0;
+    repeats.reset();
+    persist();
+    return what;
+  });
 
   async function connectWithLaunch(
     config: BrowserConsoleConfig,
@@ -245,7 +256,8 @@ export default function (pi: ExtensionAPI) {
     if (!config.enabled || !config.blocking || changedWebFiles.size === 0) return;
     if (isGateClaimed()) return;
 
-    await withGateWorkingMessage(ctx, "Checking browser console — inference idle", async () => {
+    await withGateWorkingMessage(ctx, "Checking browser console — inference idle · /skip to move on", async () => {
+      const mark = skipMark();
       if (!browser.connected) {
         if (config.autoConnect) await ensureConnect(ctx, config);
         if (!browser.connected) return;
@@ -254,10 +266,11 @@ export default function (pi: ExtensionAPI) {
       // Judge the code as it is now: fresh reload with an empty buffer. Errors logged
       // earlier in the turn may already be fixed.
       try {
-        await browser.reloadFresh(config.reloadWaitMs, ctx.signal);
+        await browser.reloadFresh(config.reloadWaitMs, skipAwareSignal("browser", ctx.signal));
       } catch {
         return; // tab gone / reload failed — cannot judge, do not block on stale data
       }
+      if (skippedSince(mark, "browser")) return;
       if (ctx.signal?.aborted) return;
       const issues = failureEntries(browser, config);
 

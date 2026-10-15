@@ -9,6 +9,7 @@ import { classifyVerifyFailure, formatClassifiedFailure } from "../shared/failur
 import { detectStacks, formatStackDoctorLines } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
 import { attemptNotes, giveUpNote, RepeatTracker } from "../shared/gate-messages";
+import { registerSkipCommand, registerSkipHandler, skipAwareSignal, skipMark, skippedSince } from "../shared/gate-skip";
 
 /** Custom session-entry type used to persist verify state across /resume + reload. */
 const STATE_TYPE = "foundation-verify-state";
@@ -37,6 +38,18 @@ export default function (pi: ExtensionAPI) {
   function persist() {
     pi.appendEntry<PersistedState>(STATE_TYPE, { changedFiles: [...changedFiles], fixAttempts });
   }
+
+  // /skip: forget the checks pending for the current changes (the next edit re-arms them).
+  registerSkipCommand(pi);
+  registerSkipHandler("verify", () => {
+    if (changedFiles.size === 0) return null;
+    const what = `${changedFiles.size} changed file(s)`;
+    changedFiles.clear();
+    fixAttempts = 0;
+    repeats.reset();
+    persist();
+    return what;
+  });
 
   // 0) Warn at startup if the toolchain for an enabled language is missing,
   //    so the verifier is never silently a no-op.
@@ -113,10 +126,12 @@ export default function (pi: ExtensionAPI) {
     const config = cfg(ctx);
     if (!config.blocking || changedFiles.size === 0) return;
 
-    await withGateWorkingMessage(ctx, "Verifying (lint/tests) — inference idle", async (status) => {
-      const result = await verify(ctx.cwd, [...changedFiles], config, undefined, ctx.signal, (label) =>
+    await withGateWorkingMessage(ctx, "Verifying (lint/tests) — inference idle · /skip to move on", async (status) => {
+      const mark = skipMark();
+      const result = await verify(ctx.cwd, [...changedFiles], config, undefined, skipAwareSignal("verify", ctx.signal), (label) =>
         status.step(label),
       );
+      if (skippedSince(mark, "verify")) return; // the user moved on: /skip already cleared the state
       if (ctx.signal?.aborted) return; // user cancelled the turn — leave state intact
 
       if (!result.failed) {

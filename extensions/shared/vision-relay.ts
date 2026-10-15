@@ -191,7 +191,8 @@ export async function presentVisionToSession(
   intro: string,
   images: VisionImageContent[],
   paths: string[],
-  opts: { source?: "harness" | "user" } = {},
+  /** checklist: false — not a layout review, so no QA checklist (play mode steps). */
+  opts: { source?: "harness" | "user"; checklist?: boolean } = {},
 ): Promise<SessionVisionPart[]> {
   if (images.length === 0) {
     return [{ type: "text", text: intro }];
@@ -201,7 +202,7 @@ export async function presentVisionToSession(
   const { buildVisionContent, buildVisionMessage } = await import("../scenarios/vision");
   const fromUser = opts.source === "user";
   if (!config.enabled || sessionSeesImages(ctx)) {
-    return buildVisionContent(intro, images, paths);
+    return buildVisionContent(intro, images, paths, opts.checklist ?? true);
   }
 
   // A user's pasted image is not a QA screenshot: no QA checklist, and when the model
@@ -210,7 +211,7 @@ export async function presentVisionToSession(
     fromUser
       ? `${intro}\n\n[The user attached ${images.length} image(s). You cannot see images and ${why}. ` +
         `Ask the user to describe what the image shows before acting on it.]`
-      : `${buildVisionMessage(intro, paths)}\n\n${why}`;
+      : `${buildVisionMessage(intro, paths, opts.checklist ?? true)}\n\n${why}`;
 
   const picked = pickRelayModel(ctx, config.relayModel);
   if (!picked.model) {

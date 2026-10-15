@@ -89,6 +89,8 @@ export interface ScenariosConfig {
   failOnWeakSpec: boolean;
   /** Max images attached per vision message (context bloat cap). */
   maxScreenshotsPerRun: number;
+  /** Play mode: steps (each = actions + a screenshot) per session before it asks to save or stop. */
+  playMaxSteps: number;
   maxImageWidth: number;
   maxImageBytes: number;
   jpegQuality: number;
@@ -114,6 +116,7 @@ export const DEFAULT_CONFIG: ScenariosConfig = {
   autoDiscoverScenarios: true,
   failOnWeakSpec: true,
   maxScreenshotsPerRun: 4,
+  playMaxSteps: 40,
   maxImageWidth: 1280,
   maxImageBytes: 900_000,
   jpegQuality: 80,
