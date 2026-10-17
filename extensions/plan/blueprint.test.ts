@@ -8,13 +8,13 @@ Goal: a browser pixel-art editor.
 Bar: spec
 
 ## v1 — core
-- [x] **R-01** Canvas: create 32/64/128 px, zoom 1-16x, grid toggle · proves: canvas.spec.ts
-- [~] **R-02** Pencil and eraser, 1-4 px, undo/redo 50 steps · proves: draw-undo.spec.ts
-- [ ] **R-03** Palette with 16 swatches and a custom colour picker · proves: palette.spec.ts
-- [!] **R-04** PNG export at 1x and 4x scale · proves: export.spec.ts · blocked: toBlob null
+- [x] **R-01** Canvas: create 32/64/128 px, zoom 1-16x, grid toggle · serves: S-01 · proves: canvas.spec.ts
+- [~] **R-02** Pencil and eraser, 1-4 px, undo/redo 50 steps · serves: S-02 · proves: draw-undo.spec.ts
+- [ ] **R-03** Palette with 16 swatches and a custom colour picker · serves: S-03 · proves: palette.spec.ts
+- [!] **R-04** PNG export at 1x and 4x scale · serves: S-04 · proves: export.spec.ts · blocked: toBlob null
 
 ## v2
-- [-] **R-10** Layers: add, hide and reorder layers · proves: layers.spec.ts · deferred: budget
+- [-] **R-10** Layers: add, hide and reorder layers · serves: S-05 · proves: layers.spec.ts · deferred: budget
 
 ## References
 - **REF-01** refs/aseprite.png — tool strip left → R-02, R-03
@@ -44,9 +44,9 @@ describe("blueprint", () => {
 
   it("setMark rewrites only the mark and its note, keeping the rest of the line", () => {
     let t = setMark(BP, "R-03", "x");
-    assert.match(t, /- \[x\] \*\*R-03\*\* Palette with 16 swatches and a custom colour picker · proves: palette\.spec\.ts\n/);
+    assert.match(t, /- \[x\] \*\*R-03\*\* Palette with 16 swatches and a custom colour picker · serves: S-03 · proves: palette\.spec\.ts\n/);
     t = setMark(t, "R-04", " ");
-    assert.match(t, /- \[ \] \*\*R-04\*\* PNG export at 1x and 4x scale · proves: export\.spec\.ts\n/, "blocked note dropped");
+    assert.match(t, /- \[ \] \*\*R-04\*\* PNG export at 1x and 4x scale · serves: S-04 · proves: export\.spec\.ts\n/, "blocked note dropped");
     t = setMark(t, "R-01", "!", "spec\nfailed   twice");
     assert.match(t, /\*\*R-01\*\* Canvas.*· proves: canvas\.spec\.ts · blocked: spec failed twice/);
     assert.equal(setMark("a\r\n- [ ] **R-01** x · proves: verify\r\n", "R-01", "x"), "a\r\n- [x] **R-01** x · proves: verify\r\n", "keeps CRLF");
@@ -86,9 +86,9 @@ describe("blueprint", () => {
 Bar: ${bar}
 
 ## v1
-- [ ] **R-01** Pick the next destination on the route map · proves: route-map.spec.ts
-- [ ] **R-02** Route generation keeps 5-20 nodes per leg · proves: verify
-- [ ] **R-03** The chart shows the risk of each branch · input: hover a node on the map · proves: chart.spec.ts
+- [ ] **R-01** Pick the next destination on the route map · serves: S-01 · proves: route-map.spec.ts
+- [ ] **R-02** Route generation keeps 5-20 nodes per leg · serves: S-02 · proves: verify
+- [ ] **R-03** The chart shows the risk of each branch · input: hover a node on the map · serves: S-03 · proves: chart.spec.ts
 `);
     const product = checkBlueprint(bp("product")).join("\n");
     assert.match(product, /R-01: product bar — say how the user does it/);

@@ -402,6 +402,12 @@ export default function (pi: ExtensionAPI) {
     const level = task.level;
     const cap = config.passes[level];
     if (cap === 0) {
+      // Off (or a level with no passes): nothing of a pass may linger on screen.
+      if (task.activeSurface || task.awaitingReport) {
+        task.activeSurface = null;
+        task.awaitingReport = null;
+      }
+      clearPassDisplay(ctx);
       if (changedUiFiles.size > 0) {
         changedUiFiles.clear();
         persist();
@@ -791,8 +797,22 @@ export default function (pi: ExtensionAPI) {
         }
         // Apply to the current task immediately so the next agent_end/turn uses it.
         if (task && word !== "auto") {
+          const passRunning = Boolean(task.activeSurface || task.awaitingReport);
           task.level = word;
           task.source = "session";
+          if (word === "off" && passRunning) {
+            // A pass already handed the model its fixes: end it, clear its list, and tell
+            // the model if it is still working on them.
+            task.activeSurface = null;
+            task.awaitingReport = null;
+            clearPassDisplay(ctx);
+            if (!ctx.isIdle()) {
+              pi.sendUserMessage(
+                "POLISH OFF — the user turned polish off. Stop the polish fixes you were given; finish only what the user's own request needs, and do not call polish_report.",
+                { deliverAs: "steer" },
+              );
+            }
+          }
         }
         setStatus(ctx);
         syncTools(ctx);

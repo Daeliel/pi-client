@@ -1,63 +1,7 @@
-import type { BlueprintItem } from "./blueprint";
+import type { BlueprintItem } from "../plan/blueprint";
+import { formatMinutes } from "../plan/procedure";
 
-/** How to write a blueprint. Returned by write_blueprint / start_autopilot when none exists. */
-export function buildBlueprintProcedure(opts: {
-  blueprintPath: string;
-  refsDir: string;
-  budgetMinutes: number | null;
-  imageSearch: boolean;
-  forAutopilot: boolean;
-}): string {
-  const budget =
-    opts.budgetMinutes !== null
-      ? `\nTime budget: ${formatMinutes(opts.budgetMinutes)}. Size v1 to fit it; put the rest in v2/later.`
-      : "";
-  const images = opts.imageSearch
-    ? "Use find_reference_images (or any image-search tool you have) for visual references; keep them with save_reference_image."
-    : "If the user gave images, keep them with save_reference_image. If you have an image-search tool, use it and save results with save_reference_image.";
-  return `BLUEPRINT — write the plan to ${opts.blueprintPath} before any app code.${budget}
-
-1. Sources: the user's request; any design doc they named (expand it, never silently rewrite it — mark your additions "(added)"); reference images; for "works like <product>" requests, research the product with web_search instead of guessing.
-2. Inventory: screens, entities, actions, states the thing needs.
-3. Tiers: \`## v1\` = the smallest version that is a usable product. Then \`## v2\`, \`## later\`. Build vertical slices (each item usable on its own), not layers.
-4. Items: one line each, small enough to build and prove in one sitting, described in checkable terms (inputs, limits, visible result).
-5. Evidence: every item says what proves it — a Playwright/pytest spec file, \`verify\` (the project's tests), or \`manual\` (only the user can judge, e.g. "feels fun").
-   **Bar:** \`product\` when a person is meant to use the result (an app or game, "make it playable/usable", quality matters) — then fill the gaps the sources leave: for every item ask "how does the user do this, and what do they see?", write it as \`· input: …\`, and add items for what the sources never mention (selecting, confirming, leaving a screen, what an old mode does once a new one starts). Add 1–2 \`@journey\` items: the main flow start to finish through real input. \`spec\` when only what is written is wanted (a library, an API, "just what the doc says") — gaps go under \`## Assumptions\` as questions. If the request does not tell you, ask the user once.
-6. References: ${images} Describe each under \`## References\` with what it shows, which items it informs, and what it cannot prove (motion, feel, exact colours).
-7. Call blueprint_check and fix every problem it reports.${opts.forAutopilot ? "\n8. Then call start_autopilot again." : "\n8. Then stop and tell the user the blueprint is ready (they can build it step by step or start autopilot on it)."}
-
-Format:
-\`\`\`
-# Blueprint: <name>
-
-Goal: <one line>
-Bar: product | spec
-Stack: <languages/frameworks>
-
-## v1 — core
-- [ ] **R-01** <what it does, checkably> · input: <how the user does it, e.g. click a node on the map> · proves: <name>.spec.ts
-- [ ] **R-02** <…> · proves: verify
-- [ ] **R-03** Journey: <the main flow, start to finish> · input: <the steps> · proves: <flow>.spec.ts (test title ends with @journey)
-
-## v2
-- [ ] **R-10** <…> · proves: <name>.spec.ts
-
-## later
-- [ ] **R-20** <…> · proves: manual
-
-## References
-- **REF-01** ${opts.refsDir.replace(/^\.pi\/blueprint\//, "")}/<file>.png — <what it shows> → R-01, R-02 · cannot show: <…> · source: <url or file>
-
-## Assumptions
-\`\`\`
-Order inside a tier is the build order — put what other items depend on first. Leave every box as \`[ ]\`: status marks are set by autopilot from evidence, not by hand.`;
-}
-
-export function formatMinutes(min: number): string {
-  const m = Math.max(0, Math.round(min));
-  const h = Math.floor(m / 60);
-  return h > 0 ? `${h}:${String(m % 60).padStart(2, "0")}h` : `${m} min`;
-}
+export { formatMinutes };
 
 const ASSUMPTION_RULE =
   "If something is unclear, do not ask the user — choose what you would recommend, add it under `## Assumptions` as `- A-nn (R-xx): …`, and continue.";
@@ -73,6 +17,8 @@ export function buildBrief(opts: {
   maxAttempts: number;
   refs: string[];
   resumed?: boolean;
+  /** The item's moment and the source's own words for what it serves (from the plan). */
+  context?: string;
 }): string {
   const { item } = opts;
   const evidence =
@@ -88,7 +34,7 @@ export function buildBrief(opts: {
   return `AUTOPILOT${opts.resumed ? " (resumed)" : ""} — next item ${item.id}${opts.attempt > 1 ? ` (attempt ${opts.attempt}/${opts.maxAttempts})` : ""} · ${opts.progress}${opts.timeNote ? ` · ${opts.timeNote}` : ""}
 
 ${item.id}: ${item.title}${input}
-${evidence}${refs}
+${evidence}${refs}${opts.context ? `\n\n${opts.context}` : ""}
 
 Build ${item.id} now, then make its evidence pass. Do not work on other items, and do not change the [ ] marks in the blueprint — autopilot sets them from evidence. ${ASSUMPTION_RULE}
 

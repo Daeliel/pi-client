@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, foundationConfigPaths } from "../shared/config-paths";
 import { readJsonConfig } from "../shared/json-config";
+import { isLightLevel, type LightLevel } from "./light";
 
 export interface RunnerConfig {
   enabled?: boolean;
@@ -82,6 +83,10 @@ export interface ScenariosConfig {
   level: ScenarioLevel;
   /** product | spec | unset — see ResultBar. */
   bar: ResultBar;
+  /** How small a change must be to skip the specs (light_change) — strict | standard | loose | off. */
+  light: LightLevel;
+  /** After this many identical failures the model may ask the user to look (0 = never). */
+  askUserAfter: number;
   /** Block agent_end while scenarios are undefined, missing, or failing. */
   blocking: boolean;
   maxFixAttempts: number;
@@ -120,6 +125,8 @@ export const DEFAULT_CONFIG: ScenariosConfig = {
   enabled: true,
   level: "thorough",
   bar: "unset",
+  light: "standard",
+  askUserAfter: 2,
   blocking: true,
   maxFixAttempts: 5,
   timeoutMs: 180000,
@@ -228,6 +235,8 @@ export function loadConfig(cwd: string): ScenariosConfig {
   }
   if (!isScenarioLevel(cfg.level)) cfg.level = DEFAULT_CONFIG.level;
   if (!isResultBar(cfg.bar)) cfg.bar = DEFAULT_CONFIG.bar;
+  if (!isLightLevel(cfg.light)) cfg.light = DEFAULT_CONFIG.light;
+  if (!Number.isInteger(cfg.askUserAfter) || cfg.askUserAfter < 0) cfg.askUserAfter = DEFAULT_CONFIG.askUserAfter;
   return cfg;
 }
 
@@ -277,6 +286,19 @@ export function persistResultBar(cwd: string, bar: ResultBar): string {
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const existing = readJson(target) ?? {};
   fs.writeFileSync(target, `${JSON.stringify({ ...existing, bar }, null, 2)}\n`, "utf8");
+  return target;
+}
+
+/** Save one top-level setting to the project (default) or user config. */
+export function persistScenariosSetting(
+  cwd: string,
+  patch: Partial<Pick<ScenariosConfig, "light" | "askUserAfter">>,
+  scope: QaShotPersistScope = "project",
+): string {
+  const target = scope === "user" ? userScenariosConfigPath() : projectScenariosConfigPath(cwd);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const existing = readJson(target) ?? {};
+  fs.writeFileSync(target, `${JSON.stringify({ ...existing, ...patch }, null, 2)}\n`, "utf8");
   return target;
 }
 

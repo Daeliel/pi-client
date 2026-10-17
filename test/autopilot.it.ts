@@ -4,9 +4,24 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import autopilotExt from "../extensions/autopilot/index";
+import planExt from "../extensions/plan/index";
+import { addSource } from "../extensions/plan/sources";
 import { APP_VERIFY_CONFIG, call, createHarness, reply, seenBy, writeProjectConfig } from "./harness";
 
 const BLUEPRINT = ".pi/blueprint/BLUEPRINT.md";
+const POINTS_FILE = ".pi/blueprint/POINTS.md";
+
+/** The user's request, word for word — the plan's source. */
+const REQUEST = "Make a.app say fixed, and make b.app record the second step.";
+const POINTS = `- S-01 (SRC-1) "Make a.app say fixed"
+- S-02 (SRC-1) "make b.app record the second step"
+`;
+
+/** Register the request as SRC-1 and its points, as a model following the procedure would. */
+function seedSources(cwd: string) {
+  addSource(cwd, BLUEPRINT, { text: REQUEST });
+  fs.writeFileSync(path.join(cwd, POINTS_FILE), POINTS);
+}
 
 const BP = `# Blueprint: app
 
@@ -14,8 +29,8 @@ Goal: make a.app say fixed and b.app record the second step.
 Bar: spec
 
 ## v1
-- [ ] **R-01** a.app contains the word fixed when opened · proves: verify
-- [ ] **R-02** b.app records that the second step is done · proves: verify
+- [ ] **R-01** a.app contains the word fixed when opened · serves: S-01 · proves: verify
+- [ ] **R-02** b.app records that the second step is done · serves: S-02 · proves: verify
 `;
 
 /** UI that approves: Start, no time limit; confirms everything (git init, rollback). */
@@ -43,13 +58,15 @@ function readBp(cwd: string): string {
 describe("autopilot", () => {
   it("writes a blueprint, asks once, builds item by item from evidence, and ignores ticked boxes", async () => {
     const dialogs: string[] = [];
-    const h = await createHarness({ extensions: [autopilotExt], ui: approvingUi(dialogs) });
+    const h = await createHarness({ extensions: [planExt, autopilotExt], ui: approvingUi(dialogs) });
     try {
       writeProjectConfig(h.cwd, "verify.config.json", APP_VERIFY_CONFIG);
       writeProjectConfig(h.cwd, "autopilot.config.json", { checkpoints: false });
       const tampered = BP.replace("- [ ] **R-01**", "- [~] **R-01**").replace("- [ ] **R-02**", "- [x] **R-02**");
       h.faux.setResponses([
         call("start_autopilot", { goal: "app" }), // no blueprint yet -> procedure
+        call("add_source", { text: REQUEST }),
+        call("write", { path: POINTS_FILE, content: POINTS }),
         call("write", { path: BLUEPRINT, content: BP }),
         call("blueprint_check", {}),
         call("start_autopilot", { goal: "app" }), // approved -> brief for R-01
@@ -79,8 +96,9 @@ describe("autopilot", () => {
   });
 
   it("retries a failing item, blocks it at the attempt cap, and moves on", async () => {
-    const h = await createHarness({ extensions: [autopilotExt], files: { [BLUEPRINT]: BP }, ui: approvingUi() });
+    const h = await createHarness({ extensions: [planExt, autopilotExt], files: { [BLUEPRINT]: BP }, ui: approvingUi() });
     try {
+      seedSources(h.cwd);
       writeProjectConfig(h.cwd, "verify.config.json", APP_VERIFY_CONFIG);
       writeProjectConfig(h.cwd, "autopilot.config.json", { checkpoints: false, itemAttempts: 2 });
       h.faux.setResponses([
@@ -113,13 +131,14 @@ describe("autopilot", () => {
 
   it("'Don't offer again this session' hides the tool; a stop without edits is nudged, then paused", async () => {
     const h = await createHarness({
-      extensions: [autopilotExt],
+      extensions: [planExt, autopilotExt],
       files: { [BLUEPRINT]: BP },
       ui: {
         select: (async (title: string) => (title.startsWith("Autopilot") ? "Don't offer again this session" : undefined)) as never,
       },
     });
     try {
+      seedSources(h.cwd);
       let toolsAfter: string[] = [];
       h.faux.setResponses([
         call("start_autopilot", { goal: "app" }),
@@ -136,8 +155,9 @@ describe("autopilot", () => {
       h.dispose();
     }
 
-    const h2 = await createHarness({ extensions: [autopilotExt], files: { [BLUEPRINT]: BP }, ui: approvingUi() });
+    const h2 = await createHarness({ extensions: [planExt, autopilotExt], files: { [BLUEPRINT]: BP }, ui: approvingUi() });
     try {
+      seedSources(h2.cwd);
       writeProjectConfig(h2.cwd, "verify.config.json", APP_VERIFY_CONFIG);
       writeProjectConfig(h2.cwd, "autopilot.config.json", { checkpoints: false, stallStops: 2 });
       h2.faux.setResponses([
@@ -161,8 +181,9 @@ describe("autopilot", () => {
   });
 
   it("an early 'done' is checked, deferring takes an item out of the run", async () => {
-    const h = await createHarness({ extensions: [autopilotExt], files: { [BLUEPRINT]: BP }, ui: approvingUi() });
+    const h = await createHarness({ extensions: [planExt, autopilotExt], files: { [BLUEPRINT]: BP }, ui: approvingUi() });
     try {
+      seedSources(h.cwd);
       writeProjectConfig(h.cwd, "verify.config.json", APP_VERIFY_CONFIG);
       writeProjectConfig(h.cwd, "autopilot.config.json", { checkpoints: false });
       h.faux.setResponses([
@@ -191,20 +212,20 @@ describe("autopilot", () => {
   });
 
   it("/blueprint writes a plan only; headless pi gets no autopilot unless config allows it", async () => {
-    const h = await createHarness({ extensions: [autopilotExt], ui: {} });
+    const h = await createHarness({ extensions: [planExt, autopilotExt], ui: {} });
     try {
       h.faux.setResponses([reply("blueprint written")]);
       await h.session.prompt("/blueprint a todo app with tags");
       await h.settle();
       const ask = h.userMessages().find((m) => m.startsWith("a todo app with tags"));
       assert.match(ask ?? "", /BLUEPRINT — write the plan to \.pi\/blueprint\/BLUEPRINT\.md/);
-      assert.match(ask ?? "", /stop and tell the user the blueprint is ready/);
+      assert.match(ask ?? "", /show the user the Reading and the Walkthrough/);
     } finally {
       h.dispose();
     }
 
     for (const headless of ["deny", "allow"] as const) {
-      const hh = await createHarness({ extensions: [autopilotExt] }); // no UI = print mode
+      const hh = await createHarness({ extensions: [planExt, autopilotExt] }); // no UI = print mode
       try {
         writeProjectConfig(hh.cwd, "autopilot.config.json", { headless });
         let tools: string[] = [];
@@ -223,17 +244,49 @@ describe("autopilot", () => {
   });
 
   it("product bar: one playtest before finishing; what it finds becomes items and gets built", async () => {
-    const PRODUCT = BP.replace("Bar: spec", "Bar: product");
-    const h = await createHarness({ extensions: [autopilotExt], files: { [BLUEPRINT]: PRODUCT }, ui: approvingUi() });
+    const PRODUCT = BP.replace("Bar: spec", "Bar: product").replace(
+      "\n## v1\n",
+      `
+## Reading
+### Interpretations
+### Additions
+
+## Walkthrough
+### M-01 Open the apps
+- Situation: two files, a.app and b.app
+- Decision: none — the person checks both say what they should
+- Needs to see: the contents of both files
+- Does: opens them
+- Feedback: the words are there
+- Then: done
+- Turns off: nothing
+### Forgotten moments
+- First launch / orientation: M-01
+- Learning the controls: n/a — no controls
+- Waiting / idle: n/a
+- Failure and its feedback: n/a
+- Cancel / undo: n/a
+- End of the loop and starting again: n/a
+- Switching modes or stages: n/a — one screen
+- Saving and coming back: n/a
+
+## v1
+`,
+    ).replace("· serves: S-01 · proves: verify", "· serves: S-01 · moment: M-01 · proves: verify");
+    const h = await createHarness({ extensions: [planExt, autopilotExt], files: { [BLUEPRINT]: PRODUCT }, ui: approvingUi() });
     try {
+      seedSources(h.cwd);
       writeProjectConfig(h.cwd, "verify.config.json", APP_VERIFY_CONFIG);
       writeProjectConfig(h.cwd, "autopilot.config.json", { checkpoints: false });
       const withFinding = PRODUCT.replace("- [ ] **R-01**", "- [x] **R-01**").replace("- [ ] **R-02**", "- [x] **R-02**") +
-        "- [ ] **R-03** c.app explains what the second step did, so a person understands it · proves: verify\n";
+        "- [ ] **R-03** c.app explains what the second step did, so a person understands it · serves: added · proves: verify\n";
       h.faux.setResponses([
         call("start_autopilot", { goal: "app" }),
         call("write", { path: "a.app", content: "fixed" }),
         reply("R-01 done"),
+        // R-01 completes moment M-01: it is checked as a whole before the run moves on
+        call("moment_check", { moment: "M-01", narration: "a.app opens and says fixed", differences: [] }),
+        reply("M-01 checked"),
         call("write", { path: "b.app", content: "done" }),
         reply("R-02 done"),
         // playtest turn: the model finds a gap and adds it as an item
@@ -247,6 +300,9 @@ describe("autopilot", () => {
       await h.settle();
 
       const users = h.userMessages();
+      assert.equal(startsWith(users, "MOMENT CHECK M-01 Open the apps"), 1, "the completed moment was checked once");
+      const checks = JSON.parse(fs.readFileSync(path.join(h.cwd, ".pi/blueprint/checks.json"), "utf8"));
+      assert.equal(checks["M-01"].state, "done");
       assert.equal(startsWith(users, "AUTOPILOT — playtest before finishing (result bar: product)"), 1, "exactly one playtest");
       assert.equal(startsWith(users, "AUTOPILOT — next item R-03"), 1, "the finding was built");
       assert.match(readBp(h.cwd), /- \[x\] \*\*R-03\*\*/);
@@ -266,8 +322,9 @@ describe("autopilot", () => {
     const saved = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]));
     Object.assign(process.env, env);
     const dialogs: string[] = [];
-    const h = await createHarness({ extensions: [autopilotExt], files: { [BLUEPRINT]: BP }, ui: approvingUi(dialogs) });
+    const h = await createHarness({ extensions: [planExt, autopilotExt], files: { [BLUEPRINT]: BP }, ui: approvingUi(dialogs) });
     try {
+      seedSources(h.cwd);
       writeProjectConfig(h.cwd, "verify.config.json", APP_VERIFY_CONFIG);
       h.faux.setResponses([
         call("start_autopilot", { goal: "app" }),

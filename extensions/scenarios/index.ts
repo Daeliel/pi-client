@@ -7,6 +7,7 @@ import {
   isScenarioLevel,
   loadConfig,
   persistResultBar,
+  persistScenariosSetting,
   persistMaxSpecsBeforeAudit,
   persistQaShotEnabled,
   persistQaShotMode,
@@ -44,6 +45,9 @@ import {
   setCanonicalPick,
 } from "./housekeeping";
 import { findJourneySpecs, formatSpecPatternWarnings, scanSpecPatterns } from "./spec-audit";
+import { autopilotRunning, markFromSpecResults } from "../plan/marks";
+import { loadConfig as loadPlanConfig } from "../plan/config";
+import { ChangeMeter, describeLimits, formatHowToCheck, formatSize, isLightLevel, overLimit, type LightLevel } from "./light";
 import {
   alreadyReviewed,
   buildPendingReview,
@@ -85,6 +89,8 @@ const TOOLS = [
   "scenarios_housekeep",
   "list_scenarios",
   "propose_scenario_cleanup",
+  "light_change",
+  "ask_user_to_verify",
 ];
 const WEB_FILE = /\.(html?|js|mjs|cjs|jsx|ts|tsx|css|vue|svelte)$/i;
 
@@ -129,6 +135,22 @@ export default function (pi: ExtensionAPI) {
   let fixAttempts = 0;
   let qaFixAttempts = 0;
   const repeats = new RepeatTracker();
+  /** Each code file as it was before this change set, to measure a light change. */
+  const meter = new ChangeMeter();
+  /** The model said this change is light; the gate checks the size at the end. */
+  let lightClaim: { why: string; howToCheck: string[] } | null = null;
+  /** Identical failures in a row, from the gate and run_scenarios alike. */
+  const askTracker = new RepeatTracker();
+  /** Set once the same failure repeated askUserAfter times: the model may ask the user to look. */
+  let askOffer: { specs: string[] } | null = null;
+
+  function clearChanges() {
+    changedFiles.clear();
+    meter.clear();
+    lightClaim = null;
+    askTracker.reset();
+    askOffer = null;
+  }
   let visualQaConfirmed = false;
   let scenarios: ScenarioDefinition[] = [];
   let lastRunById: Record<string, "pass" | "fail" | "skip"> = {};
@@ -208,18 +230,23 @@ export default function (pi: ExtensionAPI) {
   registerSkipHandler("scenarios", () => {
     if (changedFiles.size === 0) return null;
     const what = `${changedFiles.size} changed file(s)`;
-    changedFiles.clear();
+    clearChanges();
     fixAttempts = 0;
     repeats.reset();
     persist();
     return what;
   });
 
-  function recordRunResults(result: Awaited<ReturnType<typeof runScenarios>>, ran: ScenarioDefinition[]) {
+  function recordRunResults(result: Awaited<ReturnType<typeof runScenarios>>, ran: ScenarioDefinition[], ctx?: ExtensionContext) {
     for (const c of result.checks) {
       lastRunById[c.scenarioId] = c.status;
     }
     persist();
+    // A plan's boxes follow evidence in every mode: a passing spec ticks its item.
+    if (ctx) {
+      const changed = markFromSpecResults(ctx.cwd, result.checks);
+      if (changed.length && ctx.hasUI) ctx.ui.notify(`Plan: ${changed.join(", ")}.`, "info");
+    }
   }
 
   function isScenarioSpecPath(p: string): boolean {
@@ -243,6 +270,8 @@ export default function (pi: ExtensionAPI) {
     if (qaMode(config) === "model") wanted.push("confirm_visual_qa");
     if (config.bar === "unset") wanted.push("set_result_bar");
     if (activeReview) wanted.push("propose_scenario_cleanup");
+    if (config.light !== "off" && !autopilotRunning(ctx.cwd, loadPlanConfig(ctx.cwd).blueprintPath)) wanted.push("light_change");
+    if (askOffer && ctx.hasUI) wanted.push("ask_user_to_verify");
     syncOwnedTools(pi, TOOLS, wanted);
   }
 
@@ -276,6 +305,13 @@ export default function (pi: ExtensionAPI) {
     pi.sendUserMessage(buildReviewPrompt(review, reviewReason(audit), cap), { deliverAs: "followUp" });
     return null;
   }
+
+  // Remember each file before its first edit, so a light change can be measured.
+  pi.on("tool_call", async (event, ctx) => {
+    if (!isEditTool(event.toolName)) return;
+    const p = extractEditPath("input" in event ? event.input : undefined);
+    if (p) meter.snapshot(ctx.cwd, p);
+  });
 
   // During a review the user decides what goes; the model only proposes.
   pi.on("tool_call", async (event, ctx) => {
@@ -311,7 +347,7 @@ export default function (pi: ExtensionAPI) {
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom" && entry.customType === STATE_TYPE) {
         const data = entry.data as PersistedState | undefined;
-        changedFiles.clear();
+        clearChanges();
         for (const f of data?.changedFiles ?? []) changedFiles.add(f);
         fixAttempts = data?.fixAttempts ?? 0;
         qaFixAttempts = data?.qaFixAttempts ?? 0;
@@ -344,11 +380,13 @@ export default function (pi: ExtensionAPI) {
     fixAttempts = 0;
     qaFixAttempts = 0;
     repeats.reset();
+    askTracker.reset();
+    askOffer = null;
     const config = cfg(ctx);
     if (!config.enabled) return;
 
     if (!config.blocking) {
-      changedFiles.clear();
+      clearChanges();
       scenarios = [];
       visualQaConfirmed = false;
       specsCreatedThisSession = [];
@@ -364,6 +402,7 @@ export default function (pi: ExtensionAPI) {
       stackSummary: detection.summary,
       level: config.level,
       bar: config.bar,
+      light: config.light,
     });
 
     return {
@@ -530,12 +569,29 @@ export default function (pi: ExtensionAPI) {
       // Docs/notes/assets only — nothing behavioural to prove. Forget them so they
       // do not make a later unrelated turn look like a code change.
       if (changedFiles.size > 0) {
-        changedFiles.clear();
+        clearChanges();
         persist();
       }
       return;
     }
     if (isGateClaimed()) return;
+
+    if (lightClaim) {
+      const size = meter.measure();
+      const over = meter.covers(ctx.cwd, changedFiles) ? overLimit(config.light, size) : "the change could not be measured";
+      if (!over) {
+        if (ctx.hasUI) {
+          ctx.ui.notify(`Light change (${formatSize(size)}) — specs not run.\n${formatHowToCheck(lightClaim.howToCheck)}`, "info");
+        }
+        clearChanges();
+        fixAttempts = 0;
+        qaFixAttempts = 0;
+        persist();
+        return;
+      }
+      if (ctx.hasUI) ctx.ui.notify(`The change grew past a ${config.light} light change (${over}) — running the specs.`, "warning");
+      lightClaim = null;
+    }
 
     await withGateWorkingMessage(ctx, "Acceptance gates (scenarios/QA) — inference idle · /skip to move on", async (status) => {
       const mark = skipMark();
@@ -548,7 +604,7 @@ export default function (pi: ExtensionAPI) {
             "error",
           );
           leaveGiveUpNote(fixAttempts, "no acceptance scenarios were defined or written for the code change");
-          changedFiles.clear();
+          clearChanges();
           fixAttempts = 0;
           persist();
           return;
@@ -589,7 +645,7 @@ export default function (pi: ExtensionAPI) {
               "error",
             );
             leaveGiveUpNote(fixAttempts, classified.evidence);
-            changedFiles.clear();
+            clearChanges();
             scenarios = [];
             fixAttempts = 0;
             qaFixAttempts = 0;
@@ -608,12 +664,12 @@ export default function (pi: ExtensionAPI) {
               `Fix the app or tests — do not finish while scenarios fail.` +
               (notes ? `\n${notes}` : ""),
             { screens: config.visionOnFailure ? result.screenshots : undefined },
-          );
+          ) + askUserOffer(ctx, config, report, result);
           const shots = config.visionOnFailure ? (result.screenshots ?? []) : [];
           await sendVisionFollowUp(ctx, intro, shots, config);
           return;
         }
-        recordRunResults(result, picked);
+        recordRunResults(result, picked, ctx);
       }
       if (levelNote && ctx.hasUI) ctx.ui.notify(levelNote, "info");
 
@@ -640,7 +696,7 @@ export default function (pi: ExtensionAPI) {
             `Visual QA not confirmed after ${config.maxFixAttempts} attempts — stopping the fix loop. Run /scenarios qa on and try again.`,
             "error",
           );
-          changedFiles.clear();
+          clearChanges();
           scenarios = [];
           fixAttempts = 0;
           qaFixAttempts = 0;
@@ -722,7 +778,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      changedFiles.clear();
+      clearChanges();
       scenarios = [];
       fixAttempts = 0;
       qaFixAttempts = 0;
@@ -732,6 +788,118 @@ export default function (pi: ExtensionAPI) {
       vanishedNote = "";
       persist();
     });
+  });
+
+  /** After askUserAfter identical failures, offer ask_user_to_verify (the text to append, or ""). */
+  function askUserOffer(
+    ctx: ExtensionContext,
+    config: ScenariosConfig,
+    report: string,
+    result: Awaited<ReturnType<typeof runScenarios>>,
+  ): string {
+    askTracker.repeated(report);
+    if (!ctx.hasUI || config.askUserAfter <= 0 || askTracker.streak < config.askUserAfter) return "";
+    askOffer = { specs: result.checks.filter((c) => c.status === "fail").map((c) => c.scenarioId) };
+    syncTools(ctx);
+    return (
+      `\n\nThe same failure came ${askTracker.streak} times in a row. If what fails is something a person can judge at a glance — ` +
+      `a colour, how it looks, how it feels — call ask_user_to_verify: say what to look at and where. ` +
+      `If they say it is right, the check counts as passed (verified by user). Do not use it for logic, data, numbers or errors.`
+    );
+  }
+
+  pi.registerTool({
+    name: "light_change",
+    label: "Light Change",
+    description:
+      "Say this change is small and low-risk (a colour, a label, a spacing tweak, one condition) so the scenario specs are not run for it. " +
+      "Lint, typecheck and unit tests still run. The extension measures the change; if it is bigger than this project allows, the specs run as usual.",
+    promptSnippet: "Mark a small, low-risk change so the specs are not run for it",
+    parameters: Type.Object({
+      why: Type.String({ description: "Why this is small and low-risk, in one sentence." }),
+      howToCheck: Type.Array(Type.String(), {
+        description: "1-4 steps a person can follow to see the change works (where to go, what to look at, what they should see).",
+        minItems: 1,
+        maxItems: 4,
+      }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const config = cfg(ctx);
+      const text = (t: string, isError = false) => ({ content: [{ type: "text" as const, text: t }], details: {}, isError });
+      if (config.light === "off") return text("Light changes are off for this project — the specs run for every code change.", true);
+      const size = meter.measure();
+      const over = size.files > 0 ? overLimit(config.light, size) : null;
+      if (over) {
+        return text(
+          `Not a light change: ${over}. This project allows ${describeLimits(config.light)} (${config.light}). ` +
+            "Write or run the specs as usual.",
+          true,
+        );
+      }
+      lightClaim = { why: params.why, howToCheck: params.howToCheck };
+      return text(
+        `Accepted as a light change (${config.light}: ${describeLimits(config.light)}; now ${formatSize(size)}). ` +
+          "The specs will not run for it, unless the change grows past that. Lint, typecheck and unit tests still run. " +
+          `End your reply to the user with exactly this:\n\n${formatHowToCheck(params.howToCheck)}`,
+      );
+    },
+  });
+
+  pi.registerTool({
+    name: "ask_user_to_verify",
+    label: "Ask User To Verify",
+    description:
+      "Only after the same check failed several times, for things a person judges at a glance (a colour, how it looks, how it feels): " +
+      "ask the user to look. Yes = the check counts as passed (verified by user). No = you get their note.",
+    promptSnippet: "Ask the user to look at something a person judges at a glance",
+    parameters: Type.Object({
+      what: Type.String({ description: "What should be right, in plain words (e.g. 'the Save button is green')." }),
+      howToLook: Type.String({ description: "Where to look and how to get there (e.g. 'open http://localhost:5173, Settings tab')." }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const text = (t: string, isError = false) => ({ content: [{ type: "text" as const, text: t }], details: {}, isError });
+      if (!askOffer || !ctx.hasUI) {
+        return text(`Not now: this is offered only after the same failure repeats ${cfg(ctx).askUserAfter} times.`, true);
+      }
+      const offer = askOffer;
+      const yes = "Yes — it is right";
+      const choice = await ctx.ui.select(`Please check: ${params.what}\nHow to look: ${params.howToLook}`, [yes, "No — something is off"]);
+      if (choice === undefined) return text("The user did not answer. Keep fixing, or tell them what still fails.");
+      if (choice === yes) {
+        const file = path.join(ctx.cwd, cfg(ctx).scenariosDir, "verified-by-user.json");
+        let records: unknown[] = [];
+        try {
+          records = JSON.parse(fs.readFileSync(file, "utf8")) as unknown[];
+        } catch {
+          records = [];
+        }
+        records.push({ at: new Date().toISOString(), what: params.what, howToLook: params.howToLook, specs: offer.specs });
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, `${JSON.stringify(records, null, 2)}\n`, "utf8");
+        clearChanges();
+        scenarios = [];
+        fixAttempts = 0;
+        qaFixAttempts = 0;
+        visualQaConfirmed = false;
+        persist();
+        syncTools(ctx);
+        ctx.ui.notify(`Verified by user: ${params.what}`, "info");
+        return text(
+          `The user looked and says it is right: "${params.what}". Recorded as verified by user` +
+            (offer.specs.length ? ` (failing spec(s): ${offer.specs.join(", ")})` : "") +
+            ". The scenario gate is closed for this change. Finish: tell the user it was verified by them, not by the specs" +
+            (offer.specs.length ? ", and that the spec(s) above may check the wrong thing." : "."),
+        );
+      }
+      const note = (await ctx.ui.input("What is off?", "e.g. still blue, too dark, wrong place")) ?? "";
+      askTracker.reset();
+      askOffer = null;
+      syncTools(ctx);
+      return text(
+        `The user looked and says it is NOT right${note.trim() ? `: "${note.trim()}"` : " (no note)"}. ` +
+          "Fix that — their words outrank the spec — then the specs run again.",
+      );
+    },
   });
 
   pi.registerTool({
@@ -935,7 +1103,7 @@ export default function (pi: ExtensionAPI) {
         progress.done();
       }
       const report = withVanishedNote(formatReport(result, picked)) + (levelNote ? `\n\n${levelNote}` : "");
-      recordRunResults(result, picked);
+      recordRunResults(result, picked, ctx);
       if (result.failed) {
         const classified = classifyScenarioFailure({
           report,
@@ -946,8 +1114,10 @@ export default function (pi: ExtensionAPI) {
         const classifiedText = formatClassifiedFailure(classified, "run_scenarios failed.", {
           screens: config.visionOnFailure ? result.screenshots : undefined,
         });
-        return buildRunScenariosResponse(ctx, classifiedText, result, config, "");
+        return buildRunScenariosResponse(ctx, classifiedText + askUserOffer(ctx, config, report, result), result, config, "");
       }
+      askTracker.reset();
+      askOffer = null;
       return buildRunScenariosResponse(ctx, report, result, config, "");
     },
   });
@@ -1380,7 +1550,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("scenarios", {
     description:
-      "Acceptance scenarios — list | run | run-all | sync | level | bar | tidy | review | cap | pick | clear | doctor | qa on|off|status|model|human|approve [project]",
+      "Acceptance scenarios — list | run | run-all | sync | level | bar | light | ask-after | tidy | review | cap | pick | clear | doctor | qa on|off|status|model|human|approve [project]",
     handler: async (args, ctx) => {
       const config = cfg(ctx);
       if (!config.enabled) {
@@ -1469,6 +1639,51 @@ export default function (pi: ExtensionAPI) {
         configCache = null;
         syncTools(ctx);
         ctx.ui.notify(`Result bar: ${wanted} (saved to ${file}).`, "info");
+        return;
+      }
+
+      if (sub === "light") {
+        const wanted = parts[1]?.toLowerCase();
+        if (!wanted) {
+          ctx.ui.notify(
+            `Light changes: ${config.light}. A small change the model calls light skips the specs; lint, typecheck and unit tests still run.\n` +
+              `  strict   — ${describeLimits("strict")}\n` +
+              `  standard — ${describeLimits("standard")} (default)\n` +
+              `  loose    — ${describeLimits("loose")}\n` +
+              `  off      — every code change runs the specs\n` +
+              "/scenarios light strict|standard|loose|off [user] — saved for this project, or for every project with user.",
+            "info",
+          );
+          return;
+        }
+        if (!isLightLevel(wanted)) {
+          ctx.ui.notify("Use /scenarios light strict, standard, loose or off (add user to save it for every project).", "warning");
+          return;
+        }
+        const file = persistScenariosSetting(ctx.cwd, { light: wanted as LightLevel }, parts[2]?.toLowerCase() === "user" ? "user" : "project");
+        configCache = null;
+        syncTools(ctx);
+        ctx.ui.notify(`Light changes: ${wanted} — ${describeLimits(wanted as LightLevel)} (saved to ${file}).`, "info");
+        return;
+      }
+
+      if (sub === "ask-after") {
+        if (!parts[1]) {
+          ctx.ui.notify(
+            `Ask you to look: after ${config.askUserAfter || "never (0)"} identical failure(s) of something a person judges at a glance.\n` +
+              "/scenarios ask-after <n> [user] — 0 turns it off.",
+            "info",
+          );
+          return;
+        }
+        const value = Number(parts[1]);
+        if (!Number.isInteger(value) || value < 0 || value > 20) {
+          ctx.ui.notify("Use a whole number from 0 (off) to 20.", "warning");
+          return;
+        }
+        const file = persistScenariosSetting(ctx.cwd, { askUserAfter: value }, parts[2]?.toLowerCase() === "user" ? "user" : "project");
+        configCache = null;
+        ctx.ui.notify(`Ask you to look: ${value === 0 ? "off" : `after ${value} identical failure(s)`} (saved to ${file}).`, "info");
         return;
       }
 
@@ -1652,7 +1867,7 @@ export default function (pi: ExtensionAPI) {
         } finally {
           progress.done();
         }
-        recordRunResults(result, toRun);
+        recordRunResults(result, toRun, ctx);
         const report = withVanishedNote(formatReport(result, toRun));
         if (result.failed) {
           ctx.ui.notify("Scenarios failed — sending failures to the agent to fix.", "error");
@@ -1682,7 +1897,7 @@ export default function (pi: ExtensionAPI) {
         } finally {
           progress.done();
         }
-        recordRunResults(result, toRun);
+        recordRunResults(result, toRun, ctx);
         const report = withVanishedNote(formatReport(result, toRun));
         if (result.failed) {
           ctx.ui.notify("Scenarios failed — sending failures to the agent to fix.", "error");

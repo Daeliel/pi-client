@@ -47,6 +47,39 @@ describe("polish passes", () => {
     }
   });
 
+  it("/polish off during a pass clears its fix list and tells the working model to stop", async () => {
+    const widgets: Array<string[] | undefined> = [];
+    const h = await createHarness({
+      extensions: [polishExt],
+      files: WEB,
+      ui: { setWidget: ((key: string, lines: string[] | undefined) => key === "polish" && widgets.push(lines)) as never },
+    });
+    try {
+      writeProjectConfig(h.cwd, "polish.config.json", { level: "showcase", announceAuto: false });
+      let switched: Promise<void> | null = null;
+      h.faux.setResponses([
+        call("write", { path: "index.html", content: "<button>Go</button>" }),
+        reply("built"),
+        call("polish_report", { surface: "App", weaknesses: ["button — flat — give it depth"] }),
+        () => {
+          switched = h.session.prompt("/polish off"); // the user types while the model fixes
+          return call("write", { path: "style.css", content: "/* half a fix */" });
+        },
+        reply("stopping"),
+        reply("unused"),
+      ]);
+      await h.session.prompt("build a landing page");
+      await switched;
+      await h.settle();
+      assert.ok(widgets.some((w) => w?.some((l) => l.includes("fixing: button"))), "the fix list was shown");
+      assert.equal(widgets.at(-1), undefined, "and cleared once polish is off");
+      assert.ok(h.userMessages().some((m) => m.startsWith("POLISH OFF")), "the working model is told to stop");
+      assert.equal(passPrompts(h.userMessages()).length, 1, "no further pass");
+    } finally {
+      h.dispose();
+    }
+  });
+
   it("stops a surface when weaknesses are named but nothing is edited", async () => {
     const h = await createHarness({ extensions: [polishExt], files: WEB });
     try {

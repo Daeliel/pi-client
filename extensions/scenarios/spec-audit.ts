@@ -177,7 +177,26 @@ const LOOKUP_TAIL = new Set(["for", "of", "by", "at", "in", "on"]);
  * enemy to test against. They make a scripted run deterministic; they do not skip the flow.
  */
 const CONDITION_CALL =
-  /^(?:(?:set|enable|disable|toggle|use|with|freeze|unfreeze|pause|resume)[_A-Z]?)?(?:seed|rng|random|time|timescale|speed|clock|now|feature|features|flag|flags|godmode|invincib|immortal|cheat|difficulty)|^(?:reset|spawn|mock|stub|seed)/i;
+  /^(?:(?:set|enable|disable|toggle|use|with|freeze|unfreeze|pause|resume)[_A-Z]?)?(?:seed|rng|random|time|timescale|speed|clock|now|feature|features|flag|flags|godmode|invincib|immortal|cheat|difficulty)|^(?:reset|spawn|mock|stub|seed)|^(?:step|tick|advance(?:Time|Clock|Frames?)?|fastForward|skipTime)$/i;
+
+/** Waits longer than these are usually waiting for game time to pass — a time hook does it in a blink. */
+const LONG_SLEEP_MS = 2000;
+const LONG_POLL_MS = 8000;
+const LONG_TEST_MS = 60_000;
+
+function msValue(text: string): number {
+  return Number(text.replace(/_/g, ""));
+}
+
+/** The longest sleep, poll/wait timeout and per-test timeout in a spec. */
+export function longestWaits(text: string): { sleep: number; poll: number; test: number } {
+  const max = (re: RegExp) => Math.max(0, ...[...text.matchAll(re)].map((m) => msValue(m[1]!)));
+  return {
+    sleep: max(/waitForTimeout\s*\(\s*([\d_]+)/g),
+    poll: max(/\btimeout\s*:\s*([\d_]+)/g),
+    test: Math.max(max(/test\.setTimeout\s*\(\s*([\d_]+)/g), max(/configure\s*\(\s*\{[^}]*timeout\s*:\s*([\d_]+)/g)),
+  };
+}
 
 /** DOM/browser functions reachable through window — not the app's own surface. */
 const BROWSER_FUNCS = /^(?:getComputedStyle|requestAnimationFrame|cancelAnimationFrame|setTimeout|setInterval|clearTimeout|clearInterval|matchMedia|getSelection|fetch|atob|btoa|structuredClone|queueMicrotask|alert|confirm|prompt|open|close|focus|blur|print|postMessage|scroll\w*|dispatchEvent|addEventListener|removeEventListener)$/;
@@ -293,6 +312,24 @@ export function scanSpecFileContent(rel: string, text: string, options: SpecScan
       message:
         `Spec drives the app only through its own functions (${actions.slice(0, 5).join(", ")}) and never uses its UI — ` +
         "it proves the logic, not that a person can do it. Do the user's actions with real clicks/keys; keep hooks for setup (seed, flags, spawn) and reads.",
+    });
+  }
+
+  // Long waits mean the spec waits for the app's own time to pass. Not wrong, but slow and
+  // flaky under load: a time-scale or step hook (a condition, allowed everywhere) does it fast.
+  const waits = longestWaits(text);
+  const long = [
+    waits.sleep > LONG_SLEEP_MS ? `sleeps ${waits.sleep / 1000}s` : "",
+    waits.poll > LONG_POLL_MS && waits.test <= LONG_TEST_MS ? `waits up to ${waits.poll / 1000}s` : "",
+    waits.test > LONG_TEST_MS ? `allows ${waits.test / 1000}s per test` : "",
+  ].filter(Boolean);
+  if (long.length) {
+    warnings.push({
+      file: rel,
+      blocking: false,
+      message:
+        `Spec ${long.join(", ")} — probably waiting for game/app time to pass. Add a time hook to the app's test surface ` +
+        "(e.g. window.__game.setTimeScale(8) or step(seconds)) and use it instead: same proof, a fraction of the time, and no timing flakes.",
     });
   }
 

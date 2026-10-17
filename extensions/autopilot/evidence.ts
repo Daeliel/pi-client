@@ -5,7 +5,7 @@ import type { ScenarioDefinition } from "../scenarios/types";
 import { loadConfig as loadVerifyConfig } from "../verify/config";
 import { formatReport as formatVerifyReport, verify } from "../verify/engine";
 import { clipMiddle } from "../shared/output";
-import type { BlueprintItem } from "./blueprint";
+import type { BlueprintItem } from "../plan/blueprint";
 
 export interface ProofResult {
   ok: boolean;

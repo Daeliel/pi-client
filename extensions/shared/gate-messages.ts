@@ -23,17 +23,21 @@ export function failureSignature(report: string): string {
 /** Remembers the previous failure of one gate within a task. */
 export class RepeatTracker {
   private last: string | null = null;
+  /** How many failures in a row looked the same (1 for a new failure, 0 after reset). */
+  streak = 0;
 
   /** True when this failure looks the same as the previous one. */
   repeated(report: string): boolean {
     const sig = failureSignature(report);
     const same = this.last !== null && this.last === sig;
     this.last = sig;
+    this.streak = same ? this.streak + 1 : 1;
     return same;
   }
 
   reset(): void {
     this.last = null;
+    this.streak = 0;
   }
 }
 

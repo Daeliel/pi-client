@@ -8,6 +8,7 @@ import { extractEditPath, isEditTool } from "../shared/edit-tools";
 import { classifyVerifyFailure, formatClassifiedFailure } from "../shared/failure-classify";
 import { detectStacks, formatStackDoctorLines } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
+import { markFromVerifyPass } from "../plan/marks";
 import { attemptNotes, giveUpNote, RepeatTracker } from "../shared/gate-messages";
 import { registerSkipCommand, registerSkipHandler, skipAwareSignal, skipMark, skippedSince } from "../shared/gate-skip";
 
@@ -140,6 +141,9 @@ export default function (pi: ExtensionAPI) {
         fixAttempts = 0;
         repeats.reset();
         persist();
+        // Plan items proven by the suite, that the model said it was building, are done.
+        const changed = markFromVerifyPass(ctx.cwd);
+        if (changed.length && ctx.hasUI) ctx.ui.notify(`Plan: ${changed.join(", ")}.`, "info");
         return;
       }
 

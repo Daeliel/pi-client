@@ -111,6 +111,25 @@ describe("spec-audit", () => {
     assert.match(w.map((x) => x.message).join(), /@journey spec performs user actions .*commitBlueprint\(\)/);
   });
 
+  it("long waits get a hint to use a time hook; a time hook is a condition, fine in a journey", () => {
+    const slow = `test("the fight ends", async ({ page }) => {
+      await page.keyboard.press("Space");
+      await page.waitForTimeout(5000);
+      await expect.poll(async () => (await page.evaluate(() => window.__game.state())).phase, { timeout: 12_000 }).toBe("gameover");
+    });`;
+    const w = scanSpecFileContent("fight.spec.ts", slow);
+    assert.ok(!hasBlockingSpecWarnings(w), "a hint, never blocking");
+    assert.match(w.map((x) => x.message).join(), /sleeps 5s, waits up to 12s .*setTimeScale/);
+    const quick = `test("the fight ends @journey", async ({ page }) => {
+      await page.evaluate(() => window.__game.setTimeScale(8));
+      await page.keyboard.press("Space");
+      await page.evaluate(() => window.__game.step(3));
+      await page.waitForTimeout(300);
+    });`;
+    assert.deepEqual(scanSpecFileContent("fight.spec.ts", quick), [], "short waits, time hooks as conditions");
+    assert.match(scanSpecFileContent("s.spec.ts", `test.describe.configure({ timeout: 90_000 });`).map((x) => x.message).join(), /allows 90s per test/);
+  });
+
   it("names: verbs are actions, nouns and lookups are reads", () => {
     for (const a of ["chartTo", "goToStage", "commitBlueprint", "prepPlaceRoom", "prepLink", "repelRobber", "spendResources", "endTravel"]) {
       assert.equal(classifyAppCall(a), "action", a);

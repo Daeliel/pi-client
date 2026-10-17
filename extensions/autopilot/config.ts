@@ -2,8 +2,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, foundationConfigPaths } from "../shared/config-paths";
 import { readJsonConfig } from "../shared/json-config";
+import type { PlanScope } from "../plan/blueprint";
 
-export type AutopilotScope = "v1" | "v2" | "all";
+export type AutopilotScope = PlanScope;
 
 export interface AutopilotConfig {
   /** Master switch — when false, no autopilot/blueprint tools are offered at all. */
@@ -20,10 +21,6 @@ export interface AutopilotConfig {
   budgetCeiling: number;
   /** Commit after each item on an autopilot/<slug> branch. */
   checkpoints: boolean;
-  /** The blueprint — single source of truth for what to build and how far it got. */
-  blueprintPath: string;
-  /** Reference images live here (kept local, never shipped). */
-  refsDir: string;
 }
 
 export const DEFAULT_CONFIG: AutopilotConfig = {
@@ -34,8 +31,6 @@ export const DEFAULT_CONFIG: AutopilotConfig = {
   defaultScope: "v1",
   budgetCeiling: 1.5,
   checkpoints: true,
-  blueprintPath: ".pi/blueprint/BLUEPRINT.md",
-  refsDir: ".pi/blueprint/refs",
 };
 
 function clampInt(v: unknown, fallback: number, min: number, max: number): number {
@@ -57,8 +52,6 @@ export function loadConfig(cwd: string): AutopilotConfig {
   cfg.budgetCeiling =
     typeof cfg.budgetCeiling === "number" && cfg.budgetCeiling >= 1 && cfg.budgetCeiling <= 5 ? cfg.budgetCeiling : 1.5;
   cfg.checkpoints = cfg.checkpoints !== false;
-  if (typeof cfg.blueprintPath !== "string" || !cfg.blueprintPath) cfg.blueprintPath = DEFAULT_CONFIG.blueprintPath;
-  if (typeof cfg.refsDir !== "string" || !cfg.refsDir) cfg.refsDir = DEFAULT_CONFIG.refsDir;
   return cfg;
 }
 

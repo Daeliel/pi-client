@@ -1,6 +1,5 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AutopilotScope } from "./config";
 
 /**
  * BLUEPRINT.md — the single source of truth. Content (items, criteria, tiers, notes) is
@@ -10,6 +9,9 @@ import type { AutopilotScope } from "./config";
  *   ## v1 — core
  *   - [ ] **R-01** Canvas: create 32/64 px, zoom, grid · proves: canvas.spec.ts
  */
+
+/** How far a build goes: v1 only, v1 + v2, or every tier. */
+export type PlanScope = "v1" | "v2" | "all";
 
 export type Tier = "v1" | "v2" | "later";
 export const TIERS: Tier[] = ["v1", "v2", "later"];
@@ -39,6 +41,16 @@ export interface ParsedBlueprint {
   items: BlueprintItem[];
   /** Lines that name an id but are not a valid item line (fixable by the model). */
   malformed: Array<{ line: number; text: string; why: string }>;
+  /** Point ids listed under `## Not covered` (each with its reason). */
+  notCovered: Set<string>;
+}
+
+/** Ids an item serves: `· serves: S-07, S-08` (points) or `A-01` / `added` (additions). */
+export function servesOf(item: BlueprintItem): string[] {
+  return (item.fields.serves ?? "")
+    .split(/[,\s]+/)
+    .map((x) => x.trim().toUpperCase())
+    .filter(Boolean);
 }
 
 const ID_RE = /\*\*([A-Z]{1,4}-\d{1,4})\*\*/;
@@ -70,6 +82,8 @@ export function parseBlueprint(text: string): ParsedBlueprint {
   let tier: Tier | null = null;
   let goal = "";
   let bar: BlueprintBar | null = null;
+  let inNotCovered = false;
+  const notCovered = new Set<string>();
   lines.forEach((raw, i) => {
     const goalMatch = raw.match(/^\s*Goal\s*:\s*(.+)$/i);
     if (goalMatch && !goal) goal = goalMatch[1]!.trim();
@@ -82,6 +96,12 @@ export function parseBlueprint(text: string): ParsedBlueprint {
     }
     if (SECTION_RE.test(raw)) {
       tier = null;
+      inNotCovered = /^##\s+not covered\b/i.test(raw);
+      return;
+    }
+    if (inNotCovered) {
+      const pid = raw.match(/^\s*[-*]\s+\*{0,2}(S-\d+)/)?.[1];
+      if (pid) notCovered.add(pid);
       return;
     }
     const id = raw.match(ID_RE)?.[1];
@@ -98,7 +118,7 @@ export function parseBlueprint(text: string): ParsedBlueprint {
     const { title, fields } = splitFields(m[3]!);
     items.push({ id, mark: normMark(m[2]!), tier, title, proves: fields.proves ?? "", fields, line: i });
   });
-  return { goal, bar, items, malformed };
+  return { goal, bar, items, malformed, notCovered };
 }
 
 export function readBlueprint(cwd: string, rel: string): { text: string; parsed: ParsedBlueprint } | null {
@@ -140,13 +160,13 @@ function oneLine(s: string): string {
 }
 
 /** Items the given scope covers. */
-export function inScope(items: BlueprintItem[], scope: AutopilotScope): BlueprintItem[] {
+export function inScope(items: BlueprintItem[], scope: PlanScope): BlueprintItem[] {
   const tiers: Tier[] = scope === "v1" ? ["v1"] : scope === "v2" ? ["v1", "v2"] : TIERS;
   return items.filter((i) => i.tier !== null && tiers.includes(i.tier));
 }
 
 /** The item to work on next: one already in progress, else the first open one in blueprint order. */
-export function nextItem(items: BlueprintItem[], scope: AutopilotScope): BlueprintItem | undefined {
+export function nextItem(items: BlueprintItem[], scope: PlanScope): BlueprintItem | undefined {
   const scoped = inScope(items, scope);
   return scoped.find((i) => i.mark === "~") ?? scoped.find((i) => i.mark === " ");
 }
@@ -172,6 +192,9 @@ export function checkBlueprint(parsed: ParsedBlueprint): string[] {
     else if (!PROVES_RE.test(it.proves)) problems.push(`${it.id}: proves "${it.proves}" — use a spec file name, \`verify\`, or \`manual\`.`);
     if (parsed.bar === "product" && it.proves && !/^(verify|manual)$/i.test(it.proves) && !it.fields.input) {
       problems.push(`${it.id}: product bar — say how the user does it: \`· input: <e.g. click a node on the map>\`. Its spec must do exactly that.`);
+    }
+    if (servesOf(it).length === 0) {
+      problems.push(`${it.id}: say what it serves — \`· serves: S-07\` (the source points it builds) or an addition from \`## Reading\` (\`· serves: A-01\`; \`added\` is accepted too).`);
     }
     if (it.title.replace(/[^a-z0-9]/gi, "").length < 12) {
       problems.push(`${it.id}: "${it.title}" is too thin — say what it does in checkable terms (inputs, limits, visible result).`);
@@ -203,7 +226,7 @@ export function tierCounts(items: BlueprintItem[]): string {
 }
 
 /** Ids + marks + short titles — re-sent each brief so the plan survives compaction. */
-export function formatSummary(items: BlueprintItem[], scope: AutopilotScope): string {
+export function formatSummary(items: BlueprintItem[], scope: PlanScope): string {
   return inScope(items, scope)
     .map((i) => `  [${i.mark}] ${i.id} ${i.title.slice(0, 70)}${i.fields.blocked ? ` — blocked: ${i.fields.blocked}` : ""}`)
     .join("\n");

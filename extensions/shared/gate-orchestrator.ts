@@ -13,7 +13,7 @@
  * other gate is quiet, so it is always last.
  */
 
-export type GateLane = "verify" | "scenarios" | "browser" | "qa" | "polish" | "expand" | "autopilot";
+export type GateLane = "verify" | "scenarios" | "browser" | "qa" | "polish" | "expand" | "plan" | "autopilot";
 
 /**
  * pi loads every extension through its own jiti instance with moduleCache off, so a

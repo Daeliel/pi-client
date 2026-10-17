@@ -4,7 +4,6 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { loadConfig, persistProjectConfig, type AutopilotConfig, type AutopilotScope } from "./config";
 import {
-  checkBlueprint,
   formatSummary,
   inScope,
   readBlueprint,
@@ -13,7 +12,7 @@ import {
   writeBlueprint,
   type BlueprintItem,
   type Mark,
-} from "./blueprint";
+} from "../plan/blueprint";
 import { budgetDecision, parseBudget } from "./budget";
 import { proveItem, resolveSpecPath } from "./evidence";
 import {
@@ -28,9 +27,15 @@ import {
   slugify,
   startRunBranch,
 } from "./checkpoints";
-import { braveImageSearch, refImagesFor, saveReference } from "./references";
+import { refImagesFor } from "../plan/references";
+import { buildBlueprintProcedure } from "../plan/procedure";
+import { checkPlan, formatCoverage } from "../plan/check";
+import { readPoints } from "../plan/sources";
+import { itemContext, parseExperience } from "../plan/walkthrough";
+import { buildMomentCheckPrompt, markAsked, momentContext, pendingMoments } from "../plan/moment-check";
+import { loadConfig as loadPlanConfig } from "../plan/config";
+import { hasImageSearch, setPlanning, syncPlanTools } from "../plan/state";
 import {
-  buildBlueprintProcedure,
   buildBrief,
   buildFinishCheck,
   buildPlaytest,
@@ -39,7 +44,6 @@ import {
   buildStallNudge,
   formatMinutes,
 } from "./procedure";
-import { loadConfig as loadResearchConfig, resolveApiKey } from "../research/config";
 import { loadConfig as loadScenariosConfig, persistResultBar } from "../scenarios/config";
 import { findJourneySpecs } from "../scenarios/spec-audit";
 import { loadVisionImages } from "../scenarios/vision";
@@ -49,15 +53,7 @@ import { isGateClaimed, registerGateReset, tryClaimGate } from "../shared/gate-o
 import { syncOwnedTools } from "../shared/tool-activation";
 import { withGateWorkingMessage } from "../shared/working-status";
 
-const TOOLS = [
-  "start_autopilot",
-  "write_blueprint",
-  "blueprint_check",
-  "save_reference_image",
-  "find_reference_images",
-  "defer_items",
-  "finish_autopilot",
-];
+const TOOLS = ["start_autopilot", "defer_items", "finish_autopilot"];
 
 const RUN_FILE = ".pi/blueprint/run.json";
 
@@ -99,8 +95,6 @@ export default function (pi: ExtensionAPI) {
   let editsAtBrief = 0;
   /** User chose "don't offer again this session" or /autopilot off. */
   let sessionDisabled = false;
-  /** A blueprint is being written — offer the blueprint tools. */
-  let planning = false;
   let finishRequested = false;
   /**
    * The last run ended aborted. Anti-loop aborts too and then continues the session; only
@@ -113,13 +107,18 @@ export default function (pi: ExtensionAPI) {
     return configCache;
   }
 
+  /** Where the plan lives — owned by the plan extension's config. */
+  function planPaths(ctx: ExtensionContext): { blueprintPath: string; refsDir: string } {
+    return loadPlanConfig(ctx.cwd);
+  }
+
   function notify(ctx: ExtensionContext, msg: string, kind: "info" | "warning" | "error" = "info") {
     if (ctx.hasUI) ctx.ui.notify(msg, kind);
   }
 
   /** The blueprint's Bar line wins; else the project's scenarios result bar. */
   function resultBar(ctx: ExtensionContext): "product" | "spec" | "unset" {
-    const bp = readBlueprint(ctx.cwd, cfg(ctx).blueprintPath);
+    const bp = readBlueprint(ctx.cwd, planPaths(ctx).blueprintPath);
     return bp?.parsed.bar ?? loadScenariosConfig(ctx.cwd).bar;
   }
 
@@ -161,27 +160,15 @@ export default function (pi: ExtensionAPI) {
     return ctx.hasUI || config.headless === "allow";
   }
 
-  function hasImageSearch(ctx: ExtensionContext): boolean {
-    try {
-      return Boolean(resolveApiKey(loadResearchConfig(ctx.cwd)));
-    } catch {
-      return false;
-    }
-  }
-
   function syncTools(ctx: ExtensionContext) {
     if (!available(ctx)) {
       syncOwnedTools(pi, TOOLS, []);
       return;
     }
-    const wanted = ["start_autopilot", "write_blueprint"];
-    const active = run && run.status !== "done";
-    if (planning || active) {
-      wanted.push("blueprint_check", "save_reference_image");
-      if (hasImageSearch(ctx)) wanted.push("find_reference_images");
-    }
+    const wanted = ["start_autopilot"];
     if (run?.status === "running") wanted.push("defer_items", "finish_autopilot");
     syncOwnedTools(pi, TOOLS, wanted);
+    syncPlanTools(pi, ctx); // planning may have just started (start_autopilot without a blueprint)
   }
 
   function showStatus(ctx: ExtensionContext) {
@@ -190,7 +177,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setStatus("autopilot", undefined);
       return;
     }
-    const bp = readBlueprint(ctx.cwd, cfg(ctx).blueprintPath);
+    const bp = readBlueprint(ctx.cwd, planPaths(ctx).blueprintPath);
     const counts = bp ? tierCounts(inScope(bp.parsed.items, run.scope)) : "";
     const time = run.budgetMinutes !== null ? `${formatMinutes(usedMinutes())} of ${formatMinutes(run.budgetMinutes)}` : `${formatMinutes(usedMinutes())} · no limit`;
     const label = run.status === "paused" ? "paused" : run.current ?? "";
@@ -204,7 +191,7 @@ export default function (pi: ExtensionAPI) {
    * user — are rewritten; items added during the run start open.
    */
   function reconcile(ctx: ExtensionContext): { text: string; items: BlueprintItem[] } | null {
-    const rel = cfg(ctx).blueprintPath;
+    const rel = planPaths(ctx).blueprintPath;
     const bp = readBlueprint(ctx.cwd, rel);
     if (!bp || !run) return bp ? { text: bp.text, items: bp.parsed.items } : null;
     let text = bp.text;
@@ -222,7 +209,7 @@ export default function (pi: ExtensionAPI) {
   function mark(ctx: ExtensionContext, id: string, m: Mark, note?: string) {
     if (!run) return;
     run.marks[id] = note ? { mark: m, note } : { mark: m };
-    const rel = cfg(ctx).blueprintPath;
+    const rel = planPaths(ctx).blueprintPath;
     const bp = readBlueprint(ctx.cwd, rel);
     if (bp) writeBlueprint(ctx.cwd, rel, setMark(bp.text, id, m, note));
   }
@@ -241,6 +228,12 @@ export default function (pi: ExtensionAPI) {
 
   // ---------- briefs ----------
 
+  /** The item's moment and the source's own words — so it is built as meant, not as paraphrased. */
+  function planContext(ctx: ExtensionContext, item: BlueprintItem, text: string): string {
+    const points = readPoints(ctx.cwd, planPaths(ctx).blueprintPath)?.points ?? [];
+    return itemContext(item, parseExperience(text), points);
+  }
+
   async function sendBrief(ctx: ExtensionContext, item: BlueprintItem, items: BlueprintItem[], text: string, opts: { resumed?: boolean } = {}) {
     if (!run) return;
     const isSpec = !/^(verify|manual)$/i.test(item.proves.trim()) && item.proves.trim() !== "";
@@ -255,6 +248,7 @@ export default function (pi: ExtensionAPI) {
       maxAttempts: cfg(ctx).itemAttempts,
       refs: refs.map((r) => path.relative(ctx.cwd, r).replace(/\\/g, "/")),
       resumed: opts.resumed,
+      context: planContext(ctx, item, text),
     });
     editsAtBrief = editSerial;
     if (refs.length === 0) {
@@ -286,7 +280,7 @@ export default function (pi: ExtensionAPI) {
   /** Approval dialog (or headless defaults), checkpoints setup, run state. */
   async function approveAndStart(ctx: ExtensionContext, goalHint: string, scopeHint?: AutopilotScope): Promise<StartOutcome> {
     const config = cfg(ctx);
-    const bp = readBlueprint(ctx.cwd, config.blueprintPath)!;
+    const bp = readBlueprint(ctx.cwd, planPaths(ctx).blueprintPath)!;
     const items = bp.parsed.items;
     const counts = scopeCounts(items);
     const goal = bp.parsed.goal || goalHint;
@@ -307,7 +301,8 @@ export default function (pi: ExtensionAPI) {
           : "Checkpoints: this folder is not a git repository — you will be asked";
       const title =
         `Autopilot — build "${goal}" to spec\n` +
-        `Blueprint: ${config.blueprintPath} · v1: ${counts.v1} · v2: ${counts.v2} · later: ${counts.later}\n${cpLine}`;
+        `Blueprint: ${planPaths(ctx).blueprintPath} · v1: ${counts.v1} · v2: ${counts.v2} · later: ${counts.later}\n` +
+        `${formatCoverage(checkPlan(ctx.cwd, loadPlanConfig(ctx.cwd)).coverage)}\n${cpLine}`;
       const START = "Start";
       const NEVER = "Don't offer again this session";
       const pick = await ctx.ui.select(title, [START, "Not now", NEVER]);
@@ -388,7 +383,7 @@ export default function (pi: ExtensionAPI) {
     };
     segmentStart = Date.now();
     finishRequested = false;
-    planning = false;
+    setPlanning(false);
     // The blueprint decided what done means; let the scenarios gate (journeys) agree.
     if (bp.parsed.bar && loadScenariosConfig(ctx.cwd).bar === "unset") persistResultBar(ctx.cwd, bp.parsed.bar);
     const first = pickNext(items) ?? null;
@@ -421,7 +416,7 @@ export default function (pi: ExtensionAPI) {
     if (run.manualBuilt.length) lines.push(`Needs you (manual check): ${run.manualBuilt.join(", ")}`);
     const open = openInRun(items);
     if (open.length) lines.push(`Still open: ${open.map((i) => i.id).join(", ")} — /autopilot resume continues`);
-    const bp = readBlueprint(ctx.cwd, cfg(ctx).blueprintPath);
+    const bp = readBlueprint(ctx.cwd, planPaths(ctx).blueprintPath);
     const assumptions = bp?.text.match(/^\s*-\s+A-\d+.*$/gm) ?? [];
     if (assumptions.length) lines.push(`Assumptions made: ${assumptions.length} (see ## Assumptions in the blueprint)`);
     if (run.checkpoints) lines.push(`Checkpoints: branch ${run.checkpoints.branch} (started from ${run.checkpoints.from}); /autopilot rollback <id> undoes from an item on`);
@@ -437,7 +432,7 @@ export default function (pi: ExtensionAPI) {
     saveRun(ctx);
     syncTools(ctx);
     showStatus(ctx);
-    const its = items ?? readBlueprint(ctx.cwd, cfg(ctx).blueprintPath)?.parsed.items ?? [];
+    const its = items ?? readBlueprint(ctx.cwd, planPaths(ctx).blueprintPath)?.parsed.items ?? [];
     notify(ctx, report(ctx, its), status === "done" ? "info" : "warning");
   }
 
@@ -453,7 +448,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     configCache = null;
-    planning = false;
+    setPlanning(false);
     run = loadRun(ctx.cwd);
     if (run?.status === "running") {
       // pi restarted mid-run: never resume on our own.
@@ -485,7 +480,7 @@ export default function (pi: ExtensionAPI) {
     if (!run || run.status !== "running") return;
     // A user message during a run is steering: follow it, the run continues after.
     return {
-      systemPrompt: `${event.systemPrompt}\n\nAUTOPILOT is running (blueprint ${cfg(ctx).blueprintPath}, current item ${run.current ?? "—"}). A message from the user is steering — follow it, then continue the current item. Do not change the [ ] marks in the blueprint.`,
+      systemPrompt: `${event.systemPrompt}\n\nAUTOPILOT is running (blueprint ${planPaths(ctx).blueprintPath}, current item ${run.current ?? "—"}). A message from the user is steering — follow it, then continue the current item. Do not change the [ ] marks in the blueprint.`,
     };
   });
 
@@ -511,7 +506,7 @@ export default function (pi: ExtensionAPI) {
     await withGateWorkingMessage(ctx, "Autopilot — inference idle", async (status) => {
       let state = reconcile(ctx);
       if (!state) {
-        stopRun(ctx, "paused", `blueprint ${config.blueprintPath} is missing`);
+        stopRun(ctx, "paused", `blueprint ${planPaths(ctx).blueprintPath} is missing`);
         return;
       }
       const r = run!;
@@ -569,6 +564,19 @@ export default function (pi: ExtensionAPI) {
           saveRun(ctx);
           state = reconcile(ctx)!;
         }
+      }
+
+      // 1b. A moment whose items are now all built: check it as a whole before moving on.
+      const planConfig = loadPlanConfig(ctx.cwd);
+      const complete = pendingMoments(ctx.cwd, planConfig)[0];
+      const momentCheck = complete ? momentContext(ctx.cwd, planConfig, complete.id) : null;
+      if (momentCheck) {
+        markAsked(ctx.cwd, planConfig, momentCheck.moment.id);
+        saveRun(ctx);
+        if (!tryClaimGate("autopilot")) return;
+        editsAtBrief = editSerial;
+        pi.sendUserMessage(buildMomentCheckPrompt(momentCheck.moment, momentCheck.items, momentCheck.exp, momentCheck.points), { deliverAs: "followUp" });
+        return;
       }
 
       // 2. Nothing open (or the model says done): re-check every done item, then finish.
@@ -654,21 +662,21 @@ export default function (pi: ExtensionAPI) {
       if (run?.status === "running") {
         return { content: [{ type: "text", text: `Autopilot is already running (current item ${run.current ?? "—"}).` }], details: {} };
       }
-      const bp = readBlueprint(ctx.cwd, config.blueprintPath);
+      const bp = readBlueprint(ctx.cwd, planPaths(ctx).blueprintPath);
       if (!bp) {
-        planning = true;
+        setPlanning(true);
         syncTools(ctx);
         return {
-          content: [{ type: "text", text: buildBlueprintProcedure({ blueprintPath: config.blueprintPath, refsDir: config.refsDir, budgetMinutes: null, imageSearch: hasImageSearch(ctx), forAutopilot: true }) }],
+          content: [{ type: "text", text: buildBlueprintProcedure({ blueprintPath: planPaths(ctx).blueprintPath, refsDir: planPaths(ctx).refsDir, budgetMinutes: null, imageSearch: hasImageSearch(ctx.cwd), forAutopilot: true }) }],
           details: { needsBlueprint: true },
         };
       }
-      const problems = checkBlueprint(bp.parsed);
+      const problems = checkPlan(ctx.cwd, loadPlanConfig(ctx.cwd)).problems;
       if (problems.length > 0) {
-        planning = true;
+        setPlanning(true);
         syncTools(ctx);
         return {
-          content: [{ type: "text", text: `Fix the blueprint first (${config.blueprintPath}), then call start_autopilot again:\n- ${problems.join("\n- ")}` }],
+          content: [{ type: "text", text: `Fix the blueprint first (${planPaths(ctx).blueprintPath}), then call start_autopilot again:\n- ${problems.join("\n- ")}` }],
           details: { problems },
         };
       }
@@ -700,118 +708,13 @@ export default function (pi: ExtensionAPI) {
         attempt: 1,
         maxAttempts: config.itemAttempts,
         refs: refs.map((r) => path.relative(ctx.cwd, r).replace(/\\/g, "/")),
+        context: planContext(ctx, item, state.text),
       });
       editsAtBrief = editSerial;
       const text = `${outcome.note}\n\n${brief}`;
       if (refs.length === 0) return { content: [{ type: "text", text }], details: { started: true } };
       const { images, paths } = await loadVisionImages(refs, loadScenariosConfig(ctx.cwd));
       return { content: images.length ? await presentVisionToSession(ctx, text, images, paths) : [{ type: "text", text }], details: { started: true } };
-    },
-  });
-
-  pi.registerTool({
-    name: "write_blueprint",
-    label: "Write Blueprint",
-    description:
-      "Get the procedure and format for a blueprint: a tiered, checkable build plan saved to the project. " +
-      "Call it when the user wants a plan or design doc for an app ('blueprint me an app that works like Photoshop'), " +
-      "or before building something large. It does not build anything.",
-    promptSnippet: "Write a buildable blueprint (plan only)",
-    parameters: Type.Object({
-      budgetMinutes: Type.Optional(Type.Number({ description: "Time the user has for building it, if they said — v1 is sized to fit." })),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const config = cfg(ctx);
-      planning = true;
-      syncTools(ctx);
-      const exists = readBlueprint(ctx.cwd, config.blueprintPath);
-      const prefix = exists
-        ? `A blueprint already exists at ${config.blueprintPath} (${tierCounts(exists.parsed.items) || "no items"}). Extend or correct it rather than starting over, unless the user asked for a new one.\n\n`
-        : "";
-      const text =
-        prefix +
-        buildBlueprintProcedure({
-          blueprintPath: config.blueprintPath,
-          refsDir: config.refsDir,
-          budgetMinutes: typeof params.budgetMinutes === "number" ? params.budgetMinutes : null,
-          imageSearch: hasImageSearch(ctx),
-          forAutopilot: false,
-        });
-      return { content: [{ type: "text", text }], details: {} };
-    },
-  });
-
-  pi.registerTool({
-    name: "blueprint_check",
-    label: "Check Blueprint",
-    description: "Validate the blueprint's shape (goal, tiers, item ids, evidence, checkable wording) and list what to fix.",
-    parameters: Type.Object({}),
-    async execute(_id, _params, _signal, _onUpdate, ctx) {
-      const config = cfg(ctx);
-      if (run && run.status !== "done") reconcile(ctx);
-      const bp = readBlueprint(ctx.cwd, config.blueprintPath);
-      if (!bp) return { content: [{ type: "text", text: `No blueprint at ${config.blueprintPath} yet.` }], details: { ok: false }, isError: true };
-      const problems = checkBlueprint(bp.parsed);
-      if (problems.length > 0) {
-        return { content: [{ type: "text", text: `Blueprint problems:\n- ${problems.join("\n- ")}` }], details: { ok: false, problems } };
-      }
-      return { content: [{ type: "text", text: `Blueprint OK: ${tierCounts(bp.parsed.items)}.` }], details: { ok: true } };
-    },
-  });
-
-  pi.registerTool({
-    name: "save_reference_image",
-    label: "Save Reference Image",
-    description:
-      "Keep a reference image for the blueprint: download an image URL (from find_reference_images or any image-search tool) or copy a local image the user gave. " +
-      "Returns the saved path and shows you the image so you can describe it under ## References. Reference only — never copy it into the app.",
-    parameters: Type.Object({
-      source: Type.String({ description: "Image URL, or a path to an image in the project." }),
-      name: Type.String({ description: "Short file name stem, e.g. 'aseprite-main-ui'." }),
-      via: Type.Optional(Type.String({ description: "Where it came from (search tool or 'user')." })),
-    }),
-    async execute(_id, params, signal, _onUpdate, ctx) {
-      const config = cfg(ctx);
-      try {
-        const saved = await saveReference(ctx.cwd, config.refsDir, params.source, params.name, signal);
-        const text =
-          `Saved ${saved.file}. Add it under ## References as:\n` +
-          `- **REF-nn** ${saved.file.replace(/^\.pi\/blueprint\//, "")} — <what it shows> → <R-ids> · cannot show: <…> · source: ${saved.source}${params.via ? ` · via: ${params.via}` : ""}`;
-        const { images, paths } = await loadVisionImages([path.resolve(ctx.cwd, saved.file)], loadScenariosConfig(ctx.cwd));
-        const content = images.length ? await presentVisionToSession(ctx, text, images, paths) : [{ type: "text" as const, text }];
-        return { content, details: { file: saved.file } };
-      } catch (e) {
-        return { content: [{ type: "text", text: `Could not save the image: ${(e as Error).message}` }], details: {}, isError: true };
-      }
-    },
-  });
-
-  pi.registerTool({
-    name: "find_reference_images",
-    label: "Find Reference Images",
-    description:
-      "Image search (via the research extension's Brave key) for blueprint references. Returns image URLs; keep the useful ones with save_reference_image. " +
-      "If you have another image-search tool, you may use that instead.",
-    parameters: Type.Object({
-      query: Type.String({ description: "What to look for, e.g. 'pixel art editor UI layers panel'." }),
-      count: Type.Optional(Type.Number({ description: "Results (default 6, max 20)." })),
-    }),
-    async execute(_id, params, signal, _onUpdate, ctx) {
-      try {
-        const hits = await braveImageSearch(params.query, params.count ?? 6, loadResearchConfig(ctx.cwd), signal);
-        if (hits.length === 0) return { content: [{ type: "text", text: "No images found — try other words." }], details: { count: 0 } };
-        const text = hits.map((h, i) => `${i + 1}. ${h.title || "(untitled)"}\n   image: ${h.imageUrl}\n   page: ${h.pageUrl}`).join("\n");
-        return { content: [{ type: "text", text: `${text}\n\nSave the useful ones with save_reference_image (via: brave).` }], details: { count: hits.length } };
-      } catch (e) {
-        const msg = (e as Error).message;
-        const text =
-          msg === "NO_API_KEY"
-            ? "No search key configured (/research setup). Ask the user for reference images instead."
-            : msg === "NO_IMAGE_PLAN"
-              ? "The Brave key's plan does not include image search. Use another image-search tool if you have one, or ask the user for reference images."
-              : `Image search failed: ${msg}`;
-        return { content: [{ type: "text", text }], details: {}, isError: true };
-      }
     },
   });
 
@@ -868,29 +771,6 @@ export default function (pi: ExtensionAPI) {
 
   // ---------- commands ----------
 
-  pi.registerCommand("blueprint", {
-    description: "Write a buildable blueprint (plan only): /blueprint <what to build>",
-    handler: async (args, ctx) => {
-      const config = cfg(ctx);
-      const ask = args.trim();
-      if (!ask) {
-        const bp = readBlueprint(ctx.cwd, config.blueprintPath);
-        ctx.ui.notify(bp ? `Blueprint ${config.blueprintPath}: ${tierCounts(bp.parsed.items) || "no items"}.` : "Usage: /blueprint <what to build>", "info");
-        return;
-      }
-      planning = true;
-      syncTools(ctx);
-      const procedure = buildBlueprintProcedure({
-        blueprintPath: config.blueprintPath,
-        refsDir: config.refsDir,
-        budgetMinutes: null,
-        imageSearch: hasImageSearch(ctx),
-        forAutopilot: false,
-      });
-      pi.sendUserMessage(`${ask}\n\n${procedure}`);
-    },
-  });
-
   pi.registerCommand("autopilot", {
     description: "Autopilot — start | pause | resume | status | rollback <id> | off [project] | on",
     handler: async (args, ctx) => {
@@ -919,14 +799,14 @@ export default function (pi: ExtensionAPI) {
 
       if (sub === "status") {
         const r = run ?? loadRun(ctx.cwd);
-        const bp = readBlueprint(ctx.cwd, config.blueprintPath);
+        const bp = readBlueprint(ctx.cwd, planPaths(ctx).blueprintPath);
         if (!r) {
           ctx.ui.notify(bp ? `No autopilot run yet. Blueprint: ${tierCounts(bp.parsed.items)}. /autopilot starts one.` : "No blueprint and no run. /blueprint <what to build> writes one.", "info");
           return;
         }
         run = r;
         if (r.status !== "done") reconcile(ctx);
-        const items = readBlueprint(ctx.cwd, config.blueprintPath)?.parsed.items ?? [];
+        const items = readBlueprint(ctx.cwd, planPaths(ctx).blueprintPath)?.parsed.items ?? [];
         ctx.ui.notify(`${report(ctx, items)}\n\n${formatSummary(items, r.scope)}`, "info");
         return;
       }
@@ -1033,12 +913,12 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify("Wait until the agent is idle, then /autopilot.", "warning");
           return;
         }
-        const bp = readBlueprint(ctx.cwd, config.blueprintPath);
+        const bp = readBlueprint(ctx.cwd, planPaths(ctx).blueprintPath);
         if (!bp) {
           ctx.ui.notify("No blueprint yet — /blueprint <what to build> writes one first.", "warning");
           return;
         }
-        const problems = checkBlueprint(bp.parsed);
+        const problems = checkPlan(ctx.cwd, loadPlanConfig(ctx.cwd)).problems;
         if (problems.length > 0) {
           ctx.ui.notify(`Blueprint needs fixing first:\n- ${problems.slice(0, 8).join("\n- ")}`, "warning");
           return;
