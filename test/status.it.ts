@@ -37,6 +37,37 @@ describe("status line", () => {
     }
   });
 
+  it("a model that never calls status is reminded in a tool result, then the line has step and percent", async () => {
+    const log: Array<string | undefined> = [];
+    const h = await createHarness({ extensions: [statusExt], ui: widgetLog(log) });
+    try {
+      const results: string[] = [];
+      const lastResult = (context: Parameters<typeof seenBy>[0]) => {
+        const last = (context as { messages: Array<{ role: string; content: unknown }> }).messages.at(-1);
+        results.push(JSON.stringify(last?.content));
+      };
+      h.faux.setResponses([
+        call("write", { path: "a.css", content: "a{}" }),
+        (context) => {
+          lastResult(context);
+          return call("write", { path: "b.css", content: "b{}" });
+        },
+        (context) => {
+          lastResult(context);
+          return call("status", { step: "Recolouring buttons", percent: 60 });
+        },
+        reply("done"),
+      ]);
+      await h.session.prompt("make it blue");
+      await h.settle();
+      assert.doesNotMatch(results[0]!, /\[status line\]/, "not after the first call");
+      assert.match(results[1]!, /\[status line\][^"]*Call status with your current step/);
+      assert.ok(log.includes("Recolouring buttons · editing (2 files) · ~60%"), log.join(" | "));
+    } finally {
+      h.dispose();
+    }
+  });
+
   it("with a plan item being built, the percentage is the plan's (no ~)", async () => {
     const log: Array<string | undefined> = [];
     const h = await createHarness({ extensions: [statusExt, planExt], ui: widgetLog(log) });
