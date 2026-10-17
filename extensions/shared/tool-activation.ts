@@ -7,6 +7,7 @@
  * setActiveTools rebuilds the tool section of the system prompt synchronously — so the
  * prompt and the tool list stay in step. Each extension only touches the tools it owns.
  */
+import { GATED_TOOLS, playtestOn } from "./playtest";
 export interface ToolActivationApi {
   getActiveTools(): string[];
   setActiveTools(names: string[]): void;
@@ -14,6 +15,8 @@ export interface ToolActivationApi {
 
 export function syncOwnedTools(pi: ToolActivationApi, owned: readonly string[], wanted: Iterable<string>): void {
   const want = new Set(wanted);
+  // Playtest mode: the user is the check, so checking tools stay hidden whoever owns them.
+  if (playtestOn()) for (const t of GATED_TOOLS) want.delete(t);
   const active = pi.getActiveTools();
   const next = active.filter((name) => !owned.includes(name) || want.has(name));
   for (const name of owned) {

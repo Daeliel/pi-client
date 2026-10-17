@@ -146,8 +146,9 @@ export function setMark(text: string, id: string, mark: Mark, note?: string): st
     if (raw.match(ID_RE)?.[1] !== id) continue;
     const m = raw.match(ITEM_RE);
     if (!m) continue;
-    const parts = m[3]!.split(FIELD_SEP).filter((p) => !/^\s*(blocked|deferred)\s*:/i.test(p));
+    const parts = m[3]!.split(FIELD_SEP).filter((p) => !/^\s*(blocked|deferred|verified)\s*:/i.test(p));
     if (mark === "!" && note) parts.push(`blocked: ${oneLine(note)}`);
+    if (mark === "x" && note) parts.push(`verified: ${oneLine(note)}`);
     if (mark === "-" && note) parts.push(`deferred: ${oneLine(note)}`);
     lines[i] = `${m[1]}[${mark}] ${parts.join(FIELD_SEP)}`;
     return lines.join(eol);

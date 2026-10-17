@@ -20,6 +20,7 @@ import { withGateWorkingMessage } from "../shared/working-status";
 import { registerSkipHandler, skipAwareSignal, skipMark, skippedSince } from "../shared/gate-skip";
 import { syncOwnedTools } from "../shared/tool-activation";
 import { attemptNotes, giveUpNote, RepeatTracker } from "../shared/gate-messages";
+import { playtestOn } from "../shared/playtest";
 
 const TOOLS = [
   "browser_connect",
@@ -212,6 +213,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_result", async (event, ctx) => {
+    if (playtestOn()) return; // playtest mode: the user is the check
     const config = cfg(ctx);
     if (!config.enabled || !config.checkOnEdit || !isEditTool(event.toolName)) return;
 
@@ -252,6 +254,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", async (_event, ctx) => {
+    if (playtestOn()) return; // playtest mode: the user is the check
     const config = cfg(ctx);
     if (!config.enabled || !config.blocking || changedWebFiles.size === 0) return;
     if (isGateClaimed()) return;

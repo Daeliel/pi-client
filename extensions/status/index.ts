@@ -7,6 +7,7 @@ import { CONFIG_DIR_NAME, foundationConfigPaths } from "../shared/config-paths";
 import { readJsonConfig } from "../shared/json-config";
 import { extractEditPath, isEditTool } from "../shared/edit-tools";
 import { syncOwnedTools } from "../shared/tool-activation";
+import { playtestOn } from "../shared/playtest";
 import { readBlueprint, TIERS } from "../plan/blueprint";
 import { loadConfig as loadPlanConfig } from "../plan/config";
 import { activeItems, autopilotRunning } from "../plan/marks";
@@ -77,9 +78,9 @@ export function planPercent(cwd: string): number | null {
   return Math.round((items.filter((i) => i.mark === "x").length / items.length) * 100);
 }
 
-export function formatStatus(parts: { step?: string; phase?: string; plan?: number | null; estimate?: number }): string {
+export function formatStatus(parts: { mode?: string; step?: string; phase?: string; plan?: number | null; estimate?: number }): string {
   const percent = parts.plan != null ? `${parts.plan}%` : parts.estimate != null ? `~${parts.estimate}%` : "";
-  return [parts.step, parts.phase, percent].filter(Boolean).join(" · ");
+  return [parts.mode, parts.step, parts.phase, percent].filter(Boolean).join(" · ");
 }
 
 const GUIDE =
@@ -104,7 +105,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setWidget(WIDGET, undefined);
       return;
     }
-    ctx.ui.setWidget(WIDGET, [formatStatus({ step, phase, plan: planPercent(ctx.cwd), estimate })], { placement: "aboveEditor" });
+    ctx.ui.setWidget(WIDGET, [formatStatus({ mode: playtestOn() ? "playtest mode" : undefined, step, phase, plan: planPercent(ctx.cwd), estimate })], { placement: "aboveEditor" });
   }
 
   function reset() {

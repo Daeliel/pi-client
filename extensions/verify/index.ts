@@ -11,6 +11,7 @@ import { withGateWorkingMessage } from "../shared/working-status";
 import { markFromVerifyPass } from "../plan/marks";
 import { attemptNotes, giveUpNote, RepeatTracker } from "../shared/gate-messages";
 import { registerSkipCommand, registerSkipHandler, skipAwareSignal, skipMark, skippedSince } from "../shared/gate-skip";
+import { playtestOn } from "../shared/playtest";
 
 /** Custom session-entry type used to persist verify state across /resume + reload. */
 const STATE_TYPE = "foundation-verify-state";
@@ -90,6 +91,7 @@ export default function (pi: ExtensionAPI) {
       changedFiles.clear();
       persist();
     }
+    if (playtestOn()) return; // playtest mode: the user is the check
     return {
       systemPrompt: `${event.systemPrompt}\n\n${OPERATING_PROCEDURE}`,
     };
@@ -97,6 +99,7 @@ export default function (pi: ExtensionAPI) {
 
   // 2) Auto-verify (lint only) after each edit, returned inline as the edit's result.
   pi.on("tool_result", async (event, ctx) => {
+    if (playtestOn()) return; // playtest mode: the user is the check
     if (!isEditTool(event.toolName)) return;
     const p = extractEditPath(event.input);
     if (p && !changedFiles.has(p)) {
@@ -124,6 +127,7 @@ export default function (pi: ExtensionAPI) {
 
   // 3) Hard gate: do not let the agent settle idle while full verification fails.
   pi.on("agent_end", async (_event, ctx) => {
+    if (playtestOn()) return; // playtest mode: the user is the check
     const config = cfg(ctx);
     if (!config.blocking || changedFiles.size === 0) return;
 

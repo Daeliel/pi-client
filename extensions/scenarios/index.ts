@@ -76,6 +76,7 @@ import { registerSkipHandler, skipAwareSignal, skipMark, skippedSince } from "..
 import { buildSpecFromRecording, PlaySession, validateActions, type PlayAction, type StepResult } from "./play";
 import { syncOwnedTools } from "../shared/tool-activation";
 import { attemptNotes, giveUpNote, RepeatTracker } from "../shared/gate-messages";
+import { playtestOn } from "../shared/playtest";
 
 const TOOLS = [
   "scaffold_scenario",
@@ -382,6 +383,7 @@ export default function (pi: ExtensionAPI) {
     repeats.reset();
     askTracker.reset();
     askOffer = null;
+    if (playtestOn()) return; // playtest mode: the user is the check
     const config = cfg(ctx);
     if (!config.enabled) return;
 
@@ -411,6 +413,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_result", async (event, ctx) => {
+    if (playtestOn()) return; // playtest mode: the user is the check
     const config = cfg(ctx);
     if (!config.enabled || !isEditTool(event.toolName)) return;
 
@@ -563,6 +566,7 @@ export default function (pi: ExtensionAPI) {
       activeReview = null;
       syncTools(ctx);
     }
+    if (playtestOn()) return; // playtest mode: the user is the check
     const config = cfg(ctx);
     if (!config.enabled || !config.blocking) return;
     if (config.gateOnCodeChanges && ![...changedFiles].some(isCodePath)) {

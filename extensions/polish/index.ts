@@ -51,6 +51,7 @@ import { registerOnceModifier } from "../shared/once";
 import { detectStacks, isWebPath } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
 import { syncOwnedTools } from "../shared/tool-activation";
+import { playtestOn } from "../shared/playtest";
 
 const STATE_TYPE = "foundation-polish-state";
 const WIDGET_KEY = "polish";
@@ -294,6 +295,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     resetGateClaim();
     configCache = null;
+    if (playtestOn()) return; // playtest mode: the user is the check
     const config = cfg(ctx);
     if (!config.enabled) {
       setStatus(ctx);
@@ -355,6 +357,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_result", async (event, ctx) => {
+    if (playtestOn()) return; // playtest mode: the user is the check
     const config = cfg(ctx);
     if (!config.enabled) return;
 
@@ -397,6 +400,7 @@ export default function (pi: ExtensionAPI) {
   // ---------- the gate ----------
 
   pi.on("agent_end", async (_event, ctx) => {
+    if (playtestOn()) return; // playtest mode: the user is the check
     const config = cfg(ctx);
     if (!config.enabled || !task) return;
     const level = task.level;

@@ -18,6 +18,7 @@ import { loadConfig as loadResearchConfig } from "../research/config";
 import { loadConfig as loadScenariosConfig } from "../scenarios/config";
 import { loadVisionImages } from "../scenarios/vision";
 import { presentVisionToSession } from "../shared/vision-relay";
+import { playtestOn } from "../shared/playtest";
 
 /**
  * plan — the project's plan (blueprint): written from whatever the user gives, checked for
@@ -59,6 +60,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end", async (_event, ctx) => {
     const config = cfg(ctx);
     if (!config.enabled || ctx.signal?.aborted || isGateClaimed() || autopilotRunning(ctx.cwd, config.blueprintPath)) return;
+    if (playtestOn()) return; // playtest mode: the user is the check
+
     const pending = pendingMoments(ctx.cwd, config)[0];
     if (!pending) return;
     const c = momentContext(ctx.cwd, config, pending.id);
