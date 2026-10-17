@@ -50,6 +50,19 @@ describe("verify engine", () => {
     }
   });
 
+  it("a whole-project run skips C# when the folder has no .csproj or .sln", async () => {
+    const cwd = tempProject({ "package.json": "{}" });
+    try {
+      const csharpOnly = { ...DEFAULT_CONFIG, languages: { csharp: DEFAULT_CONFIG.languages.csharp! } };
+      const result = await verify(cwd, [], csharpOnly, ["build", "test"]);
+      assert.equal(result.failed, false);
+      assert.equal(result.checks.length, 2);
+      for (const c of result.checks) assert.match(c.reason ?? "", /not applicable: no \.csproj or \.sln/);
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("runs a real test script and reports failure with the end of the output kept", async () => {
     const script = `node -e "console.log('x'.repeat(6000)); console.error('SUMMARY: 1 failed'); process.exit(1)"`;
     const cwd = tempProject({ "package.json": JSON.stringify({ scripts: { test: script } }), "a.js": "1" });

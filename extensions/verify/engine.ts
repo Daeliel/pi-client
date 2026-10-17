@@ -323,6 +323,19 @@ async function prepare(
     return { command: withFiles(raw), probe, skipReason };
   }
 
+  if (language === "csharp") {
+    // dotnet build/test need a project or solution in the folder they run in.
+    const hasProject = () => {
+      try {
+        return fs.readdirSync(cwd).some((f) => /\.(csproj|sln|slnx)$/i.test(f));
+      } catch {
+        return false;
+      }
+    };
+    const skipReason = () => (hasProject() ? null : "no .csproj or .sln in this project");
+    return { command: withFiles(raw), probe: cfg[`${kind}Probe`] as string | undefined, skipReason };
+  }
+
   // Generic / user-defined language from config.
   return { command: withFiles(raw), probe: cfg[`${kind}Probe`] as string | undefined };
 }
