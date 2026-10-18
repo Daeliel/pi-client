@@ -22,7 +22,9 @@ const PROCEDURE =
   "do not write tests or specs unless they ask for them.\n" +
   "When it is built, call hand_over: what you did (plain words, what the user will notice), how to try it " +
   "(where to go, what to do, step by step), and what to watch (what you are unsure of, where it might break). Then stop.\n" +
-  "If the user says it is broken or not right, fix exactly that, then hand_over again.";
+  "If the user says it is broken or not right, fix exactly that, then hand_over again.\n" +
+  "How something looks or feels is the user's call: do not tune it yourself through rounds of screenshots. " +
+  "Make your best version once, then hand_over and put what you are unsure of (too faint? too strong? wrong colour?) in watchFor.";
 
 export interface Handover {
   did: string[];

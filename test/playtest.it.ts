@@ -46,6 +46,7 @@ describe("playtest mode", () => {
       assert.ok(seen.tools.includes("hand_over"));
       for (const t of ["verify", "run_scenarios", "define_scenarios", "light_change"]) assert.ok(!seen.tools.includes(t), t);
       assert.match(seen.systemPrompt, /## Playtest mode/);
+      assert.match(seen.systemPrompt, /How something looks or feels is the user.s call/);
       assert.doesNotMatch(seen.systemPrompt, /Acceptance scenarios \(prove behaviour\)/);
       assert.deepEqual(h.userMessages(), ["make a.app say something"], "no gate follow-ups (a.app would fail verify)");
       assert.match(asked[0]!, /Ready to test\n\nWhat I did:\n- a\.app now says broken\n\nTry it:\n1\. open a\.app\n\nWatch for:\n- the word may be wrong/);
