@@ -2,5 +2,7 @@
   "_comment": "Copy to ~/.pi/vision.config.json (all projects) or .pi/vision.config.json (one repo). When the session model is text-only, screenshots go to relayModel and the session gets a description. Empty relayModel = first vision-capable model with auth. /vision model <provider/id> persists relayModel.",
   "enabled": true,
   "relayModel": "",
-  "maxTokens": 900
+  "maxTokens": 900,
+  "_maxImageBytesPerRequest": "Images sent with one request (base64 bytes). Older screenshots past it are left out of what is sent; the session keeps them. 33554432 = 32 MiB, 0 = no limit.",
+  "maxImageBytesPerRequest": 33554432
 }

@@ -9,8 +9,26 @@ import {
   resolveVisionModel,
   sessionSeesImages,
 } from "../shared/vision-relay";
+import { trimImages } from "../shared/image-budget";
 
 export default function (pi: ExtensionAPI) {
+  // Every request carries the whole conversation: keep its images under the byte budget.
+  let warned = false;
+  pi.on("context", async (event, ctx) => {
+    const budget = loadVisionRelayConfig(ctx.cwd).maxImageBytesPerRequest;
+    const trimmed = trimImages(event.messages, budget);
+    if (!trimmed) return;
+    if (!warned && ctx.hasUI) {
+      warned = true;
+      ctx.ui.notify(
+        `Left ${trimmed.dropped} older image(s) out of the request to stay under ${Math.round(budget / 1048576)} MiB (the session keeps them). ` +
+          "Set maxImageBytesPerRequest in vision.config.json to change it.",
+        "info",
+      );
+    }
+    return { messages: trimmed.messages };
+  });
+
   pi.on("input", async (event, ctx) => {
     const images = inputImagesToRelay(event.images);
     if (images.length === 0) return;

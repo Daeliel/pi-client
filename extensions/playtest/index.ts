@@ -123,14 +123,13 @@ export default function (pi: ExtensionAPI) {
       const ticked = tickPlanItems(ctx);
       endPlaytestOnce();
       syncTools();
-      pi.sendMessage(
-        {
-          customType: STATE_TYPE,
-          content: `The user tested it and says it is good — completed (tested by user)${ticked.length ? `; plan: ${ticked.join(", ")} done` : ""}.`,
-          display: true,
-        },
-        { deliverAs: "nextTurn" },
-      );
+      // Written now, right after the handover: as a nextTurn message it would land after the
+      // user's next request and read as if that had been tested.
+      pi.sendMessage({
+        customType: STATE_TYPE,
+        content: `The user tested it and says it is good — completed (tested by user)${ticked.length ? `; plan: ${ticked.join(", ")} done` : ""}.`,
+        display: true,
+      });
       ctx.ui.notify(`Completed — tested by you.${ticked.length ? ` Plan: ${ticked.join(", ")} done.` : ""}`, "info");
       return;
     }

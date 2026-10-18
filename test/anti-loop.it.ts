@@ -149,6 +149,32 @@ describe("anti-loop user-help trigger", () => {
     }
   });
 
+  it("in user-help, a message typed mid-run stops the run and is answered — not dropped", async () => {
+    const h = await createHarness({ extensions: [antiLoopExt], files: { "a.js": "a" } });
+    try {
+      await h.session.prompt("/stuck");
+      let answered = "";
+      h.faux.setResponses([
+        () => {
+          void h.session.prompt("looks good", { streamingBehavior: "steer" });
+          return call("read", { path: "a.js" }); // reading only: user-help is still on
+        },
+        (context) => {
+          answered = JSON.stringify((seenBy(context).last as { content?: unknown } | undefined)?.content ?? "");
+          return reply("Great — done.");
+        },
+        reply("unused"),
+      ]);
+      await h.session.prompt("check the screenshot");
+      await h.settle();
+      assert.match(answered, /looks good/, "the typed message reaches the model as the next prompt");
+      assert.equal(h.userMessages().filter((m) => m === "looks good").length, 1, "sent once, not repeated by hand");
+      assert.equal(h.faux.getPendingResponseCount(), 1);
+    } finally {
+      h.dispose();
+    }
+  });
+
   it("diverts mid-run typing to user-help when the run is thrashing", async () => {
     const h = await createHarness({ extensions: [antiLoopExt], files: { "a.js": "a" } });
     try {

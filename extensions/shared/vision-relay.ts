@@ -14,12 +14,19 @@ export interface VisionRelayConfig {
   /** "provider/modelId". Empty = first vision-capable model with auth (not the session model). */
   relayModel: string;
   maxTokens: number;
+  /**
+   * Images sent with one request, in bytes of base64. Older screenshots beyond it are left
+   * out of what is sent (the session keeps them), so a long session stays under the
+   * server's request size limit. 0 = no limit. Applies to every session model.
+   */
+  maxImageBytesPerRequest: number;
 }
 
 export const DEFAULT_CONFIG: VisionRelayConfig = {
   enabled: true,
   relayModel: "",
   maxTokens: 900,
+  maxImageBytesPerRequest: 32 * 1024 * 1024,
 };
 
 export interface VisionModelResolution {
@@ -67,6 +74,9 @@ export function loadVisionRelayConfig(cwd: string): VisionRelayConfig {
     cfg = { ...cfg, ...override };
   }
   if (!Number.isFinite(cfg.maxTokens) || cfg.maxTokens < 100) cfg.maxTokens = DEFAULT_CONFIG.maxTokens;
+  if (!Number.isFinite(cfg.maxImageBytesPerRequest) || cfg.maxImageBytesPerRequest < 0) {
+    cfg.maxImageBytesPerRequest = DEFAULT_CONFIG.maxImageBytesPerRequest;
+  }
   return cfg;
 }
 

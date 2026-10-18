@@ -120,6 +120,12 @@ describe("playtest mode", () => {
       assert.ok(!tools[0]!.includes("verify") && tools[0]!.includes("hand_over"));
       assert.match(fs.readFileSync(bpFile, "utf8"), /- \[x\] \*\*R-01\*\*.*tested by user/);
       await h.session.prompt("hi");
+      const order = h.session.messages.map((m) =>
+        m.role === "custom" ? "verdict" : m.role === "user" ? JSON.stringify(m.content) : m.role,
+      );
+      const verdict = order.indexOf("verdict");
+      const next = order.findIndex((m) => m.includes('"hi"'));
+      assert.ok(verdict >= 0 && verdict < next, `the verdict sits before the next request: ${order.join(" | ")}`);
       assert.ok(tools[1]!.includes("verify"), "verify's tool is given back");
       assert.ok(tools[1]!.includes("run_scenarios"));
       assert.ok(!tools[1]!.includes("hand_over"));

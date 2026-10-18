@@ -247,9 +247,14 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
+    // User-help is waiting for the user: their message stops whatever the model is doing and
+    // becomes the next prompt. Aborting alone would drop it (Pi 1.x leaves a message queued
+    // during an aborted run unsent), so it is re-sent once the run settles. A message with
+    // images goes through Pi's own queue: it cannot be re-sent as text.
     if (userHelpActive) {
-      if (!ctx.isIdle()) ctx.abort();
-      return;
+      if (ctx.isIdle() || event.images?.length) return;
+      abortThenSend(ctx, event.text);
+      return { action: "handled" as const };
     }
 
     // User typed while the agent was working. Ordinary steering ("also make it blue")
