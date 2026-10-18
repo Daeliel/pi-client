@@ -23,6 +23,8 @@ const WIDGET = "pi-client-status";
 /** Remind the model after this many tool calls in a run without a status update (then every NUDGE_EVERY). */
 const FIRST_NUDGE = 2;
 const NUDGE_EVERY = 10;
+/** Reminders the model may ignore before they stop for the session (a status call starts them again). */
+const MAX_IGNORED = 2;
 const NUDGE =
   "[status line] The user's status line shows no step or progress. Call status with your current step (2-5 words) " +
   "and percent (how much of this task is done, 0-100) — once now, then only when the step changes.";
@@ -98,6 +100,8 @@ export default function (pi: ExtensionAPI) {
   /** Tool calls since the last status call (or since the run began). */
   let sinceStatus = 0;
   let statusCalled = false;
+  /** Reminders sent since the model last called status — not reset per run. */
+  let ignoredNudges = 0;
 
   function render(ctx: ExtensionContext) {
     if (!ctx.hasUI) return;
@@ -154,11 +158,12 @@ export default function (pi: ExtensionAPI) {
 
   // Small models skip the status tool unless reminded where they are looking: the tool result.
   pi.on("tool_result", async (event) => {
-    if (!enabled || event.toolName === "status") return;
+    if (!enabled || event.toolName === "status" || ignoredNudges >= MAX_IGNORED) return;
     sinceStatus++;
     if (sinceStatus < (statusCalled ? NUDGE_EVERY : FIRST_NUDGE)) return;
     sinceStatus = 0;
     statusCalled = true; // later reminders keep the longer interval
+    ignoredNudges++;
     return { content: [...event.content, { type: "text" as const, text: `\n\n${NUDGE}` }] };
   });
 
@@ -187,6 +192,7 @@ export default function (pi: ExtensionAPI) {
       step = params.step.trim().slice(0, 60);
       sinceStatus = 0;
       statusCalled = true;
+      ignoredNudges = 0;
       if (typeof params.percent === "number" && Number.isFinite(params.percent)) {
         estimate = Math.max(0, Math.min(100, Math.round(params.percent)));
       }

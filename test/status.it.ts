@@ -68,6 +68,19 @@ describe("status line", () => {
     }
   });
 
+  it("a model that ignores the reminder gets it twice, then no more", async () => {
+    const h = await createHarness({ extensions: [statusExt], files: { "a.txt": "a" }, ui: widgetLog([]) });
+    try {
+      // 25 tool calls, never a status update: reminders at call 2 and call 12, then they stop.
+      h.faux.setResponses([...Array.from({ length: 25 }, (_, i) => call("write", { path: `f${i}.txt`, content: "x" })), reply("done")]);
+      await h.session.prompt("build lots");
+      const nudges = h.session.messages.filter((m) => m.role === "toolResult" && JSON.stringify(m.content).includes("[status line]"));
+      assert.equal(nudges.length, 2);
+    } finally {
+      h.dispose();
+    }
+  });
+
   it("with a plan item being built, the percentage is the plan's (no ~)", async () => {
     const log: Array<string | undefined> = [];
     const h = await createHarness({ extensions: [statusExt, planExt], ui: widgetLog(log) });
