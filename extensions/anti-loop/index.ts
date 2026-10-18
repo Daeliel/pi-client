@@ -14,6 +14,7 @@ import {
   STUCK_STEER,
   stuckPhraseRepeatCount,
   THINKING_LOOP_STEER,
+  resultSignature,
   toolFingerprint,
   TRUNCATION_STEER,
 } from "./detect";
@@ -38,6 +39,8 @@ export default function (pi: ExtensionAPI) {
    * progress, so it clears the window.
    */
   const callsSinceEdit = new Map<string, number>();
+  /** The last result of each call: the same call bringing back something new is progress, not a loop. */
+  const lastResult = new Map<string, string>();
   /** Highest repeat count of any call since the last edit (for stuck-phrase checks). */
   let maxRepeatSinceEdit = 0;
   let recoveries = 0;
@@ -72,6 +75,7 @@ export default function (pi: ExtensionAPI) {
   /** Reset per-turn counters. Does not clear hardStopped or user-help. */
   function resetTurnCounters() {
     callsSinceEdit.clear();
+    lastResult.clear();
     maxRepeatSinceEdit = 0;
     recoveries = 0;
     steeredThisTurn = false;
@@ -391,7 +395,7 @@ export default function (pi: ExtensionAPI) {
     return {
       block: true,
       reason:
-        `ANTI-LOOP: blocked repeated \`${event.toolName}\` (${seen}× identical with no edit in between). ` +
+        `ANTI-LOOP: blocked repeated \`${event.toolName}\` (${seen}× the same call with the same result, no edit in between). ` +
         `Do something different — see the follow-up message.`,
     };
   });
@@ -403,6 +407,13 @@ export default function (pi: ExtensionAPI) {
     const config = cfg(ctx);
     if (!config.enabled || hardStopped) return;
     if (!isEditTool(event.toolName)) {
+      // A loop is the same call coming back with the same result. A screenshot taken again,
+      // or a flaky test run, brings back something new: that call's count starts over.
+      const fp = toolFingerprint(event.toolName, "input" in event ? event.input : undefined);
+      const sig = resultSignature(event.content, Boolean(event.isError));
+      const prev = lastResult.get(fp);
+      lastResult.set(fp, sig);
+      if (prev !== undefined && prev !== sig) callsSinceEdit.set(fp, 1);
       // Exploring finds things; thrashing keeps coming back empty or failing.
       if (isFruitlessResult(Boolean(event.isError), event.content)) {
         fruitlessCalls += 1;
@@ -414,6 +425,7 @@ export default function (pi: ExtensionAPI) {
     const fp = toolFingerprint(event.toolName, "input" in event ? event.input : undefined);
     const own = callsSinceEdit.get(fp) ?? 0;
     callsSinceEdit.clear();
+    lastResult.clear();
     if (own > 0) callsSinceEdit.set(fp, own);
     maxRepeatSinceEdit = own;
     recoveries = 0;

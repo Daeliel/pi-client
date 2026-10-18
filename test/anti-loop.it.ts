@@ -1,5 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { Type } from "typebox";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import antiLoopExt from "../extensions/anti-loop/index";
 import { call, createHarness, fauxAssistantMessage, fauxText, fauxThinking, reply, seenBy } from "./harness";
 
@@ -74,6 +78,55 @@ describe("anti-loop", () => {
       const toolResults = h.session.messages.filter((m) => m.role === "toolResult");
       const blocked = toolResults.filter((m) => JSON.stringify(m.content).includes("ANTI-LOOP"));
       assert.equal(blocked.length, 1, "third identical read of a.js should be blocked");
+    } finally {
+      h.dispose();
+    }
+  });
+
+  it("the same call that brings back something new is not a loop; the same result is", async () => {
+    let run = 0;
+    const tools = (pi: ExtensionAPI) => {
+      pi.registerTool({
+        name: "shoot",
+        label: "Shoot",
+        description: "Rewrite shot.txt (like a test run taking a new screenshot).",
+        parameters: Type.Object({}),
+        async execute(_id, _p, _s, _u, ctx) {
+          fs.writeFileSync(path.join(ctx.cwd, "shot.txt"), `frame ${++run}`);
+          return { content: [{ type: "text", text: `saved frame ${run}` }], details: {} };
+        },
+      });
+      pi.registerTool({
+        name: "suite",
+        label: "Suite",
+        description: "A deterministic test run whose output only differs in timing.",
+        parameters: Type.Object({}),
+        async execute() {
+          return { content: [{ type: "text", text: `12 passed (${(1 + Math.random()).toFixed(1)}m)` }], details: {} };
+        },
+      });
+    };
+    const h = await createHarness({ extensions: [tools, antiLoopExt], files: { "shot.txt": "frame 0" } });
+    try {
+      h.faux.setResponses([
+        call("read", { path: "shot.txt" }),
+        call("shoot", {}),
+        call("read", { path: "shot.txt" }),
+        call("shoot", {}),
+        call("read", { path: "shot.txt" }),
+        call("shoot", {}),
+        call("read", { path: "shot.txt" }),
+        call("suite", {}),
+        call("suite", {}),
+        call("suite", {}),
+        reply("ok"),
+        reply("ok"),
+        reply("ok"),
+      ]);
+      await h.session.prompt("tune the look");
+      const results = h.session.messages.filter((m) => m.role === "toolResult") as Array<{ toolName: string; content: unknown }>;
+      const blocked = results.filter((m) => JSON.stringify(m.content).includes("ANTI-LOOP"));
+      assert.deepEqual(blocked.map((m) => m.toolName), ["suite"], "reads of a regenerated file pass; the third same-result suite run is blocked");
     } finally {
       h.dispose();
     }

@@ -1,3 +1,31 @@
+import { createHash } from "node:crypto";
+
+/**
+ * What a tool call brought back, for "same call, same result" — the actual loop signal.
+ * Durations and clock times are dropped (a rerun that only took longer is the same result);
+ * images count by their bytes, so a screenshot that was taken again reads as new.
+ */
+export function resultSignature(content: unknown, isError: boolean): string {
+  const h = createHash("sha1");
+  h.update(isError ? "E" : "O");
+  for (const part of Array.isArray(content) ? content : [content]) {
+    const p = part as { type?: string; text?: unknown; data?: unknown } | null;
+    if (p?.type === "image" && typeof p.data === "string") {
+      h.update(`img:${p.data}`);
+    } else if (p?.type === "text" && typeof p.text === "string") {
+      h.update(
+        p.text
+          .replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?Z?/g, "#ts")
+          .replace(/\b\d{1,2}:\d{2}(:\d{2})?\b/g, "#clock")
+          .replace(/\d+(\.\d+)?\s*(ms|s|sec|seconds?|m|min|minutes?)\b/gi, "#t"),
+      );
+    } else {
+      h.update(JSON.stringify(p ?? null));
+    }
+  }
+  return h.digest("hex");
+}
+
 /** Stable fingerprint for toolName + args (order-independent keys). */
 export function toolFingerprint(toolName: string, input: unknown): string {
   return `${toolName}::${stableStringify(input)}`;
@@ -196,7 +224,7 @@ export function findGhostToolCall(message: unknown, knownTools?: Iterable<string
   return null;
 }
 
-export const REPEAT_STEER = `ANTI-LOOP: You already ran that exact tool call. Do NOT repeat it.
+export const REPEAT_STEER = `ANTI-LOOP: You already ran that exact tool call and it came back the same each time. Do NOT repeat it.
 
 Pick ONE different next step:
 1. Change the code (edit/write) based on evidence you already have, OR

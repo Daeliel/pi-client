@@ -5,7 +5,7 @@ export const ANTI_LOOP_PROCEDURE = `## Anti-loop (foundation)
 
 Weak models thrash. Follow these hard rules:
 
-1. Never repeat the same tool call with the same arguments. If you already grepped/read it, act on that result.
+1. Never repeat the same tool call with the same arguments when nothing has changed. If you already grepped/read it, act on that result. (Reading a file again after it was regenerated, or rerunning a flaky test, is fine.)
 2. Keep turns short: one goal, one tool call (or one small edit). Long monologues hit the output token limit.
 3. If you notice yourself saying "stuck in a loop", stop narrating — change code, restart the server, or ask the user.
 4. If a response was truncated (max output tokens), continue with one action only — do not restart the whole investigation. Write big files in parts (write, then edit).
