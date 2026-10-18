@@ -47,6 +47,21 @@ describe("polish passes", () => {
     }
   });
 
+  it("no passes while an autopilot run owns the follow-ups", async () => {
+    const h = await createHarness({ extensions: [polishExt], files: WEB });
+    try {
+      writeProjectConfig(h.cwd, "polish.config.json", { level: "showcase", announceAuto: false });
+      fs.mkdirSync(path.join(h.cwd, ".pi/blueprint"), { recursive: true });
+      fs.writeFileSync(path.join(h.cwd, ".pi/blueprint/run.json"), JSON.stringify({ status: "running" }));
+      h.faux.setResponses([call("write", { path: "index.html", content: "<button>Go</button>" }), reply("built"), reply("unused")]);
+      await h.session.prompt("build a landing page");
+      assert.equal(passPrompts(h.userMessages()).length, 0);
+      assert.equal(h.faux.getPendingResponseCount(), 1);
+    } finally {
+      h.dispose();
+    }
+  });
+
   it("/polish off during a pass clears its fix list and tells the working model to stop", async () => {
     const widgets: Array<string[] | undefined> = [];
     const h = await createHarness({

@@ -206,6 +206,26 @@ export default function (pi: ExtensionAPI) {
     return { text, items: parsed.items };
   }
 
+  /**
+   * Items left in progress (~) by an earlier run, a pause or a restart may already be built —
+   * the run just never had a turn to prove them (another gate kept the follow-up). Prove them
+   * first, so finished work is recorded instead of being briefed again from scratch.
+   */
+  async function settleStarted(ctx: ExtensionContext, items: BlueprintItem[]): Promise<string[]> {
+    if (!run) return [];
+    const done: string[] = [];
+    for (const item of inScope(items, run.scope).filter((i) => i.mark === "~")) {
+      const proof = await proveItem(ctx.cwd, item, ctx.signal);
+      if (!proof.ok) continue;
+      mark(ctx, item.id, "x");
+      run.attempts[item.id] = 0;
+      run.finished += 1;
+      done.push(item.id);
+    }
+    if (done.length) notify(ctx, `Autopilot: ${done.join(", ")} already built — evidence passes, marked done.`);
+    return done;
+  }
+
   function mark(ctx: ExtensionContext, id: string, m: Mark, note?: string) {
     if (!run) return;
     run.marks[id] = note ? { mark: m, note } : { mark: m };
@@ -234,7 +254,13 @@ export default function (pi: ExtensionAPI) {
     return itemContext(item, parseExperience(text), points);
   }
 
-  async function sendBrief(ctx: ExtensionContext, item: BlueprintItem, items: BlueprintItem[], text: string, opts: { resumed?: boolean } = {}) {
+  async function sendBrief(
+    ctx: ExtensionContext,
+    item: BlueprintItem,
+    items: BlueprintItem[],
+    text: string,
+    opts: { resumed?: boolean; startedBefore?: boolean } = {},
+  ) {
     if (!run) return;
     const isSpec = !/^(verify|manual)$/i.test(item.proves.trim()) && item.proves.trim() !== "";
     const refs = refImagesFor(ctx.cwd, text, item.id);
@@ -248,6 +274,7 @@ export default function (pi: ExtensionAPI) {
       maxAttempts: cfg(ctx).itemAttempts,
       refs: refs.map((r) => path.relative(ctx.cwd, r).replace(/\\/g, "/")),
       resumed: opts.resumed,
+      startedBefore: opts.startedBefore,
       context: planContext(ctx, item, text),
     });
     editsAtBrief = editSerial;
@@ -275,7 +302,7 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  type StartOutcome = { started: true; first: BlueprintItem | null; note: string } | { started: false; reason: string; disable?: boolean };
+  type StartOutcome = { started: true; first: BlueprintItem | null; note: string; startedBefore: boolean } | { started: false; reason: string; disable?: boolean };
 
   /** Approval dialog (or headless defaults), checkpoints setup, run state. */
   async function approveAndStart(ctx: ExtensionContext, goalHint: string, scopeHint?: AutopilotScope): Promise<StartOutcome> {
@@ -386,7 +413,9 @@ export default function (pi: ExtensionAPI) {
     setPlanning(false);
     // The blueprint decided what done means; let the scenarios gate (journeys) agree.
     if (bp.parsed.bar && loadScenariosConfig(ctx.cwd).bar === "unset") persistResultBar(ctx.cwd, bp.parsed.bar);
-    const first = pickNext(items) ?? null;
+    await settleStarted(ctx, items);
+    const first = pickNext(reconcile(ctx)?.items ?? items) ?? null;
+    const startedBefore = first?.mark === "~";
     if (first) {
       run.current = first.id;
       mark(ctx, first.id, "~");
@@ -398,7 +427,7 @@ export default function (pi: ExtensionAPI) {
       `Autopilot started: scope ${scope}, ${budget !== null ? `budget ${formatMinutes(budget)}` : "no time limit"}, ` +
       `${checkpoints ? `checkpoints on ${checkpoints.branch}` : "no checkpoints"}.`;
     notify(ctx, `${note} Esc or /autopilot pause stops it.`);
-    return { started: true, first, note };
+    return { started: true, first, note, startedBefore };
   }
 
   function report(ctx: ExtensionContext, items: BlueprintItem[]): string {
@@ -709,6 +738,7 @@ export default function (pi: ExtensionAPI) {
         maxAttempts: config.itemAttempts,
         refs: refs.map((r) => path.relative(ctx.cwd, r).replace(/\\/g, "/")),
         context: planContext(ctx, item, state.text),
+        startedBefore: outcome.startedBefore,
       });
       editsAtBrief = editSerial;
       const text = `${outcome.note}\n\n${brief}`;
@@ -842,6 +872,8 @@ export default function (pi: ExtensionAPI) {
         run.stopReason = undefined;
         run.stalls = 0;
         segmentStart = Date.now();
+        const before = reconcile(ctx);
+        if (before) await settleStarted(ctx, before.items);
         const state = reconcile(ctx);
         const next = state ? pickNext(state.items) : undefined;
         if (!state || !next) {
@@ -849,12 +881,13 @@ export default function (pi: ExtensionAPI) {
           return;
         }
         run.current = next.id;
-        if (next.mark !== "~") mark(ctx, next.id, "~");
+        const startedBefore = next.mark === "~";
+        if (!startedBefore) mark(ctx, next.id, "~");
         saveRun(ctx);
         syncTools(ctx);
         showStatus(ctx);
         const fresh = reconcile(ctx)!;
-        await sendBrief(ctx, fresh.items.find((i) => i.id === next.id) ?? next, fresh.items, fresh.text, { resumed: true });
+        await sendBrief(ctx, fresh.items.find((i) => i.id === next.id) ?? next, fresh.items, fresh.text, { resumed: true, startedBefore });
         return;
       }
 
@@ -936,7 +969,9 @@ export default function (pi: ExtensionAPI) {
           return;
         }
         const fresh = reconcile(ctx)!;
-        await sendBrief(ctx, fresh.items.find((i) => i.id === outcome.first!.id) ?? outcome.first, fresh.items, fresh.text);
+        await sendBrief(ctx, fresh.items.find((i) => i.id === outcome.first!.id) ?? outcome.first, fresh.items, fresh.text, {
+          startedBefore: outcome.startedBefore,
+        });
         return;
       }
 

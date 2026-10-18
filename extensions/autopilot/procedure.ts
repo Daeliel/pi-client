@@ -17,6 +17,8 @@ export function buildBrief(opts: {
   maxAttempts: number;
   refs: string[];
   resumed?: boolean;
+  /** The item was in progress before (an earlier run, a pause, a restart) and its evidence does not pass yet. */
+  startedBefore?: boolean;
   /** The item's moment and the source's own words for what it serves (from the plan). */
   context?: string;
 }): string {
@@ -36,7 +38,7 @@ export function buildBrief(opts: {
 ${item.id}: ${item.title}${input}
 ${evidence}${refs}${opts.context ? `\n\n${opts.context}` : ""}
 
-Build ${item.id} now, then make its evidence pass. Do not work on other items, and do not change the [ ] marks in the blueprint — autopilot sets them from evidence. ${ASSUMPTION_RULE}
+${opts.startedBefore ? `${item.id} was already started earlier and its evidence does not pass yet: first look at what is already built for it, finish that — do not rebuild it from scratch.\n\n` : ""}Build ${item.id} now, then make its evidence pass. Do not work on other items, and do not change the [ ] marks in the blueprint — autopilot sets them from evidence. ${ASSUMPTION_RULE}
 
 Plan (blueprint ${"order"}):
 ${opts.summary}`;

@@ -95,6 +95,53 @@ describe("autopilot", () => {
     }
   });
 
+  it("a new run proves an item left in progress first: built work is recorded, not briefed again", async () => {
+    const notes: string[] = [];
+    const started = BP.replace("- [ ] **R-01**", "- [~] **R-01**"); // an earlier run built it, never proved it
+    const h = await createHarness({
+      extensions: [planExt, autopilotExt],
+      files: { [BLUEPRINT]: started, "a.app": "fixed" },
+      ui: { ...approvingUi(), notify: ((m: string) => void notes.push(m)) as never },
+    });
+    try {
+      seedSources(h.cwd);
+      writeProjectConfig(h.cwd, "verify.config.json", APP_VERIFY_CONFIG);
+      writeProjectConfig(h.cwd, "autopilot.config.json", { checkpoints: false });
+      h.faux.setResponses([
+        call("start_autopilot", { goal: "app" }),
+        call("write", { path: "b.app", content: "done" }),
+        reply("R-02 done"),
+        reply("unused"),
+      ]);
+      await h.session.prompt("carry on building it");
+      await h.settle();
+      const all = JSON.stringify(h.session.messages);
+      assert.doesNotMatch(all, /next item R-01/, "R-01 is not briefed again");
+      assert.match(all, /next item R-02/);
+      assert.ok(notes.some((n) => /R-01 already built — evidence passes, marked done/.test(n)));
+      assert.match(readBp(h.cwd), /- \[x\] \*\*R-01\*\*/);
+      const run = JSON.parse(fs.readFileSync(path.join(h.cwd, ".pi/blueprint/run.json"), "utf8"));
+      assert.equal(run.finished, 2);
+    } finally {
+      h.dispose();
+    }
+  });
+
+  it("an item left in progress that does not pass yet is briefed as started: look at what exists first", async () => {
+    const started = BP.replace("- [ ] **R-01**", "- [~] **R-01**");
+    const h = await createHarness({ extensions: [planExt, autopilotExt], files: { [BLUEPRINT]: started, "a.app": "half" }, ui: approvingUi() });
+    try {
+      seedSources(h.cwd);
+      writeProjectConfig(h.cwd, "verify.config.json", APP_VERIFY_CONFIG);
+      writeProjectConfig(h.cwd, "autopilot.config.json", { checkpoints: false });
+      h.faux.setResponses([call("start_autopilot", { goal: "app" }), reply("pausing here"), reply("unused"), reply("unused")]);
+      await h.session.prompt("carry on building it");
+      assert.match(JSON.stringify(h.session.messages), /next item R-01[\s\S]*R-01 was already started earlier and its evidence does not pass yet/);
+    } finally {
+      h.dispose();
+    }
+  });
+
   it("retries a failing item, blocks it at the attempt cap, and moves on", async () => {
     const h = await createHarness({ extensions: [planExt, autopilotExt], files: { [BLUEPRINT]: BP }, ui: approvingUi() });
     try {

@@ -52,6 +52,8 @@ import { detectStacks, isWebPath } from "../shared/stack-detect";
 import { withGateWorkingMessage } from "../shared/working-status";
 import { syncOwnedTools } from "../shared/tool-activation";
 import { playtestOn } from "../shared/playtest";
+import { autopilotRunning } from "../plan/marks";
+import { loadConfig as loadPlanConfig } from "../plan/config";
 
 const STATE_TYPE = "foundation-polish-state";
 const WIDGET_KEY = "polish";
@@ -401,6 +403,9 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_end", async (_event, ctx) => {
     if (playtestOn()) return; // playtest mode: the user is the check
+    // An autopilot run owns the follow-ups: polish passes here kept it from ever proving
+    // the item it had just built (one surface after another, for an hour).
+    if (autopilotRunning(ctx.cwd, loadPlanConfig(ctx.cwd).blueprintPath)) return;
     const config = cfg(ctx);
     if (!config.enabled || !task) return;
     const level = task.level;
