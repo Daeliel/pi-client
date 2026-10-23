@@ -41,6 +41,43 @@ async function run(
   return { ...r, out: stripAnsi(r.out) };
 }
 
+/**
+ * The failed tests in a Playwright run, from its summary ("2 failed" and the lines under it),
+ * as file:line targets: `.pi/scenarios/convoy.spec.ts:45`. Empty when the output is not Playwright's.
+ */
+export function playwrightFailures(out: string): string[] {
+  const lines = out.split(/\r?\n/);
+  const targets: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*\d+ failed\s*$/.test(lines[i]!)) continue;
+    for (let j = i + 1; j < lines.length; j++) {
+      const m = lines[j]!.match(/^\s+(?:\[[^\]]+\]\s*›\s*)?(\S+?\.(?:spec|test)\.[cm]?[jt]sx?):(\d+)(?::\d+)?\s*›/);
+      if (!m) break;
+      targets.push(`${m[1]!.replace(/\\/g, "/")}:${m[2]}`);
+    }
+  }
+  return [...new Set(targets)];
+}
+
+/** Rerun failed Playwright tests alone; the ones that pass are load-dependent. Null when there is nothing to say. */
+export async function loadDependent(
+  out: string,
+  cwd: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+  rerun = (targets: string[]) => `npx playwright test ${targets.map((t) => `"${t}"`).join(" ")} --workers=1 --reporter=line`,
+): Promise<string | null> {
+  const targets = playwrightFailures(out);
+  if (targets.length === 0 || targets.length > 20) return null;
+  const r = await run(rerun(targets), cwd, timeoutMs, signal);
+  if (r.aborted || r.timedOut || r.code !== 0) return null;
+  return (
+    `LOAD-DEPENDENT: ${targets.join(", ")} failed in the full parallel run but pass when run alone (--workers=1). ` +
+    "Likely a timing assumption (fixed waits, frame counts, a race with spawning) that breaks when the machine is busy — " +
+    "make it wait for the state it needs, or use the app's time hook. Still a failure until it passes in the full run."
+  );
+}
+
 /** True if a probe command (e.g. "ruff --version") exits 0. Results are cached per probe. */
 const toolCache = new Map<string, boolean>();
 export async function hasTool(probe: string, cwd: string): Promise<boolean> {
@@ -348,6 +385,7 @@ async function runCheck(
   timeoutMs: number,
   files: string[],
   signal?: AbortSignal,
+  rerunFlakes = false,
 ): Promise<CheckResult | null> {
   const prepared = await prepare(language, kind, cfg, cwd, files);
   if (!prepared) return null;
@@ -387,12 +425,17 @@ async function runCheck(
   if (kind === "test" && prepared.command.includes("pytest") && r.code === 5) {
     return { language, kind, label, status: "skip", output: "", reason: "no tests collected" };
   }
+  let output = r.out;
+  if (kind === "test" && r.code !== 0 && rerunFlakes) {
+    const note = await loadDependent(r.out, cwd, timeoutMs, signal);
+    if (note) output = `${note}\n\n${r.out}`;
+  }
   return {
     language,
     kind,
     label,
     status: r.code === 0 ? "pass" : "fail",
-    output: r.out,
+    output,
   };
 }
 
@@ -448,7 +491,7 @@ export async function verify(
       const langFiles = scopeFiles.length ? filesForLang(scopeFiles, lang, extMap) : [];
       for (const kind of only) {
         onCheck?.(`${scope.label ? `${scope.label} ` : ""}${lang} ${kind}`);
-        const result = await runCheck(lang, kind, cfg, scope.cwd, config.timeoutMs, langFiles, signal);
+        const result = await runCheck(lang, kind, cfg, scope.cwd, config.timeoutMs, langFiles, signal, config.rerunFlakes !== false);
         if (!result) continue;
         if (scope.label) {
           result.label = `${scope.label} ${result.label}`;

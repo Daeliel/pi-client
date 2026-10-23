@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { classifyAppCall, scanSpecFileContent, hasBlockingSpecWarnings } from "./spec-audit.ts";
+import { classifyAppCall, evaluateBodies, evaluateWrites, scanSpecFileContent, hasBlockingSpecWarnings } from "./spec-audit.ts";
 
 describe("spec-audit", () => {
   it("blocks localStorage cheats", () => {
@@ -108,7 +108,28 @@ describe("spec-audit", () => {
     const conditions = `await page.evaluate(() => { window.__game.setSeed(7); window.__game.setTimeScale(0.2); window.__game.setGodMode(true); window.__game.spawnThreat("robber"); });`;
     assert.ok(!hasBlockingSpecWarnings(scanSpecFileContent("j.spec.ts", journey(conditions))), "seed, time, invincibility, spawn are conditions");
     const w = scanSpecFileContent("j.spec.ts", journey(`await page.evaluate(() => window.__game.commitBlueprint());`));
-    assert.match(w.map((x) => x.message).join(), /@journey spec performs user actions .*commitBlueprint\(\)/);
+    assert.match(w.map((x) => x.message).join(), /@journey spec does what the user does through the app's own functions \(commitBlueprint\(\)\)/);
+
+    // Setters are setup only when declared, with why; the report lists them.
+    const setShield = `await page.evaluate(() => { const g = (window as any).__game; g.hooks.setShield(3); });`;
+    const undeclared = scanSpecFileContent("j.spec.ts", journey(setShield));
+    assert.ok(hasBlockingSpecWarnings(undeclared), "an alias does not hide the call");
+    assert.match(undeclared.map((x) => x.message).join(), /does not declare \(setShield\(\)\)[\s\S]*\/\/ @hooks: setShield — /);
+    const declared = scanSpecFileContent("j.spec.ts", `// @hooks: setShield — start the run at 3 shield
+${journey(setShield)}`);
+    assert.ok(!hasBlockingSpecWarnings(declared));
+    assert.match(declared.find((x) => x.note)!.message, /not played\): setShield — start the run at 3 shield/);
+    // A step the user takes stays blocked even when declared.
+    const start = `// @hooks: start — skip the title
+${journey("await page.evaluate(() => window.__game.start());")}`;
+    assert.match(scanSpecFileContent("j.spec.ts", start).map((x) => x.message).join(), /does what the user does .*start\(\)/);
+  });
+
+  it("outside a journey, setting a state to screenshot it is fine; taking the user's steps with no UI is not", () => {
+    const hud = `test("hud", async ({ page }) => { await page.evaluate(() => window.__game.setShield(3)); await page.screenshot({ path: "a.png" }); });`;
+    assert.ok(!hasBlockingSpecWarnings(scanSpecFileContent("hud.spec.ts", hud)));
+    const steps = `test("x", async ({ page }) => { await page.evaluate(() => window.__game.startRun()); });`;
+    assert.ok(hasBlockingSpecWarnings(scanSpecFileContent("x.spec.ts", steps)));
   });
 
   it("long waits get a hint to use a time hook; a time hook is a condition, fine in a journey", () => {
@@ -126,7 +147,7 @@ describe("spec-audit", () => {
       await page.evaluate(() => window.__game.step(3));
       await page.waitForTimeout(300);
     });`;
-    assert.deepEqual(scanSpecFileContent("fight.spec.ts", quick), [], "short waits, time hooks as conditions");
+    assert.deepEqual(scanSpecFileContent("fight.spec.ts", quick).filter((x) => !x.note), [], "short waits, time hooks as conditions");
     assert.match(scanSpecFileContent("s.spec.ts", `test.describe.configure({ timeout: 90_000 });`).map((x) => x.message).join(), /allows 90s per test/);
   });
 
@@ -152,6 +173,34 @@ describe("spec-audit", () => {
     ]) {
       assert.ok(hasBlockingSpecWarnings(scanSpecFileContent("w.spec.ts", write)), write);
     }
+  });
+  it("comments and TypeScript annotations are not code: an apostrophe in a comment does not swallow the evaluate", () => {
+    const spec = [
+      "test('aim', async ({ page }) => {",
+      "  const r = await page.evaluate(() => {",
+      "    const aims: number[] = (window as any).__G__.hooks.wagonAim();",
+      "    // The wagon's own heading (from its neighbour",
+      "    let d = Math.abs(aims[0]);",
+      "    while (d > Math.PI) d = Math.abs(d - Math.PI * 2);",
+      "    return d;",
+      "  });",
+      "  await page.mouse.click(10, 10);",
+      "});",
+    ].join("\n");
+    const bodies = evaluateBodies(spec);
+    assert.equal(bodies.length, 1);
+    assert.ok(!bodies[0]!.includes("mouse.click"), "the body ends where the evaluate ends");
+    assert.equal(evaluateWrites(bodies[0]!), false);
+    assert.ok(!hasBlockingSpecWarnings(scanSpecFileContent("aim.spec.ts", spec)));
+    // ...and a real write after such a comment is still caught
+    assert.equal(evaluateWrites("() => { // don't skip\n (window as any).__G__.stage = 3; }"), true);
+  });
+
+  it("time hooks with a unit are conditions; skip/advance alone stay actions", () => {
+    for (const n of ["stepSeconds", "tickFrames", "advanceBy", "advanceFrames", "skipTime", "fastForwardMs", "step"]) {
+      assert.equal(classifyAppCall(n), "condition", n);
+    }
+    for (const n of ["skip", "skipTutorial", "advanceLevel", "start"]) assert.equal(classifyAppCall(n), "action", n);
   });
 });
 

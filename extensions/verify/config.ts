@@ -35,6 +35,12 @@ export interface VerifyConfig {
    * runs from a workspace root (e.g. Various Projects), not the whole tree.
    */
   isolateSubprojects: boolean;
+  /**
+   * When a Playwright run inside the test command fails, run just the failed tests again,
+   * alone (--workers=1). Tests that pass alone are reported as load-dependent — still a
+   * failure, but the model knows it is timing under load, not the feature.
+   */
+  rerunFlakes: boolean;
   languages: Record<string, LanguageConfig>;
 }
 
@@ -44,6 +50,7 @@ export const DEFAULT_CONFIG: VerifyConfig = {
   timeoutMs: 120000,
   verifyOnEdit: true,
   isolateSubprojects: true,
+  rerunFlakes: true,
   languages: {
     python: {
       enabled: true,

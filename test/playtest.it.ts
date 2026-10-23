@@ -6,7 +6,7 @@ import verifyExt from "../extensions/verify/index";
 import scenariosExt from "../extensions/scenarios/index";
 import planExt from "../extensions/plan/index";
 import onceExt from "../extensions/once/index";
-import playtestExt, { GOOD, NOT_RIGHT } from "../extensions/playtest/index";
+import playtestExt, { GOOD, NOT_RIGHT, TEST_COMMAND, TEST_REQUEST } from "../extensions/playtest/index";
 import { setPlaytestSession } from "../extensions/shared/playtest";
 import { APP_VERIFY_CONFIG, call, createHarness, NODE_SCENARIOS_CONFIG, reply, seenBy, writeProjectConfig } from "./harness";
 
@@ -56,6 +56,43 @@ describe("playtest mode", () => {
       setPlaytestSession(false);
       h.dispose();
     }
+  });
+
+  it("no test runs through the shell either — unless the user asks for them", async () => {
+    const h = await createHarness({ extensions: [playtestExt], ui: { select: (async () => GOOD) as never } });
+    try {
+      await h.session.prompt("/playtest on");
+      h.faux.setResponses([
+        call("bash", { command: "npx playwright test --config=.pi/playwright.config.ts __dbg36 --reporter=line" }),
+        call("hand_over", HANDOVER),
+        reply("try it"),
+        call("bash", { command: "echo npm test" }),
+        reply("ran them"),
+        reply("unused"),
+      ]);
+      await h.session.prompt("the E key does nothing on a fresh run");
+      await h.settle();
+      await h.session.prompt("now run the tests please");
+      const results = (h.session.messages.filter((m) => m.role === "toolResult") as Array<{ toolName: string; content: unknown }>)
+        .filter((m) => m.toolName === "bash")
+        .map((m) => JSON.stringify(m.content));
+      assert.match(results[0]!, /PLAYTEST MODE: no test runs/);
+      assert.doesNotMatch(results[1]!, /PLAYTEST MODE/, "asked for: allowed");
+    } finally {
+      setPlaytestSession(false);
+      h.dispose();
+    }
+  });
+
+  it("which commands are test runs, and which requests ask for them", () => {
+    for (const c of ["npx playwright test", "npm test", "npm run test -- --grep x", "yarn test", "pnpm exec playwright test", "vitest run", "python -m pytest -q", "dotnet test"]) {
+      assert.ok(TEST_COMMAND.test(c), c);
+    }
+    for (const c of ["npm run build", "npx vite", "node scripts/latest.js", "cat tests/README.md"]) assert.ok(!TEST_COMMAND.test(c), c);
+    assert.ok(TEST_REQUEST.test("run the tests please"));
+    assert.ok(TEST_REQUEST.test("write a playwright spec for it"));
+    assert.ok(!TEST_REQUEST.test("I tested it — not right yet: the E key does nothing"), "the user testing is not asking for tests");
+    assert.ok(!TEST_REQUEST.test("make the wagons wider"));
   });
 
   it("not right: the user's note is the next task; built without a handover, the model is asked once", async () => {

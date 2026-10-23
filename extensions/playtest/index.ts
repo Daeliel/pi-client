@@ -24,7 +24,17 @@ const PROCEDURE =
   "(where to go, what to do, step by step), and what to watch (what you are unsure of, where it might break). Then stop.\n" +
   "If the user says it is broken or not right, fix exactly that, then hand_over again.\n" +
   "How something looks or feels is the user's call: do not tune it yourself through rounds of screenshots. " +
-  "Make your best version once, then hand_over and put what you are unsure of (too faint? too strong? wrong colour?) in watchFor.";
+  "Make your best version once, then hand_over and put what you are unsure of (too faint? too strong? wrong colour?) in watchFor.\n" +
+  "Do not run the test suite or Playwright (npm test, npx playwright, throwaway debug specs) — the user tests it. " +
+  "To find a bug, read the code, or add a log line and ask the user what they see.";
+
+/** Shell commands that run tests or Playwright — the user is the test in playtest mode. */
+export const TEST_COMMAND =
+  /\b(?:npx|pnpm|yarn|bunx?)\s+(?:exec\s+)?playwright\b|\bplaywright\s+test\b|\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|\bnpm\s+t\b|\b(?:vitest|jest|pytest|mocha)\b|\bnode\s+--test\b|\b(?:go|cargo|dotnet)\s+test\b/i;
+
+/** The user asks for tests in this request: then they may run. */
+export const TEST_REQUEST =
+  /\b(?:run|write|add|check|use)\b[^.\n]{0,30}\b(?:tests?|specs?|suite|playwright)\b|\bplaywright\b|\bnpm\s+test\b/i;
 
 export interface Handover {
   did: string[];
@@ -48,6 +58,8 @@ export default function (pi: ExtensionAPI) {
   let edited = false;
   /** The handover reminder was sent this run. */
   let reminded = false;
+  /** The user's request asked for tests: then the test commands are not blocked. */
+  let testsAllowed = false;
   /** Gated tools taken out of the active list, to give back when playtest ends. */
   const hidden = new Set<string>();
 
@@ -87,8 +99,25 @@ export default function (pi: ExtensionAPI) {
     syncTools();
   });
 
-  pi.on("input", async () => {
+  pi.on("input", async (event) => {
+    // The user's own words decide; follow-ups from the harness keep the current answer,
+    // except the "not right" note, which carries what the user typed.
+    if (event.source !== "extension" || event.text.startsWith("I tested it")) testsAllowed = TEST_REQUEST.test(event.text);
     syncTools();
+  });
+
+  // The shell is not gated like the tools are: running the suite or a debug spec is checking.
+  pi.on("tool_call", async (event) => {
+    if (!playtestOn() || testsAllowed) return;
+    if (event.toolName !== "bash" && event.toolName !== "powershell") return;
+    const command = "input" in event && typeof (event.input as { command?: unknown }).command === "string" ? (event.input as { command: string }).command : "";
+    if (!TEST_COMMAND.test(command)) return;
+    return {
+      block: true,
+      reason:
+        "PLAYTEST MODE: no test runs — the user is the test. Read the code and fix it, or add a log line and ask the user " +
+        "what they see, then hand_over. (If the user asks for tests, they may run.)",
+    };
   });
 
   pi.on("before_agent_start", async (event) => {

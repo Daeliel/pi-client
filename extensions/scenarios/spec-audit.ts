@@ -9,6 +9,8 @@ export interface SpecPatternWarning {
   message: string;
   /** When true, a passing run_scenarios should fail the gate. */
   blocking: boolean;
+  /** Information for the report (a journey's declared setup), not a weakness. */
+  note?: boolean;
 }
 
 const SCROLL_PROOF =
@@ -64,9 +66,43 @@ const EVAL_ASSIGN =
 
 const EVAL_INCDEC = /(?:([A-Za-z_$][\w$]*)[\w$.\[\]]*\s*(?:\+\+|--))|(?:(?:\+\+|--)\s*([A-Za-z_$][\w$]*))/g;
 
-/** Blank out string and template literal contents so words in them are not code. */
+/**
+ * Blank out string and template literal contents and drop comments, so words in them are
+ * not code. A comment can hold an apostrophe ("the wagon's heading") that would otherwise
+ * open a "string" and swallow real code.
+ */
 function stripStrings(code: string): string {
-  return code.replace(/(["'`])(?:\\.|(?!\1)[^\\])*\1/g, (s) => s[0] + s[0]);
+  let out = "";
+  let quote: string | null = null;
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i]!;
+    if (quote) {
+      if (ch === "\\") i++;
+      else if (ch === quote) {
+        out += ch;
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === "/" && code[i + 1] === "/") {
+      while (i < code.length && code[i] !== "\n") i++;
+      out += "\n";
+      continue;
+    }
+    if (ch === "/" && code[i + 1] === "*") {
+      const end = code.indexOf("*/", i + 2);
+      i = end < 0 ? code.length : end + 1;
+      out += " ";
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
 }
 
 /** Names the evaluate body declares itself (const/let/var, arrow params): local bookkeeping. */
@@ -98,7 +134,11 @@ function freshLocals(body: string): Set<string> {
  * with local variables and helper arrays — is fine.
  */
 export function evaluateWrites(rawBody: string): boolean {
-  const body = stripStrings(rawBody);
+  // A TypeScript annotation is not an assignment: `const aims: number[] = …` declares aims.
+  // A cast is not a value: `(window as any).__G__.stage = 3` writes window.__G__.stage.
+  const body = stripStrings(rawBody)
+    .replace(/\b(const|let|var)\s+([A-Za-z_$][\w$]*)\s*:[^=;]+?=(?![=>])/g, "$1 $2 =")
+    .replace(/\(\s*(window|globalThis|self|document)\s+as\s+[^)]*\)/g, "$1");
   if (EVAL_MUTATING_CALL.test(body)) return true;
   const locals = localNames(body);
   const fresh = freshLocals(body);
@@ -137,6 +177,16 @@ export function evaluateBodies(text: string): string[] {
         else if (ch === quote) quote = null;
         continue;
       }
+      // Comments: an apostrophe or a bracket in one is not code.
+      if (ch === "/" && text[i + 1] === "/") {
+        while (i < text.length && text[i] !== "\n") i++;
+        continue;
+      }
+      if (ch === "/" && text[i + 1] === "*") {
+        const end = text.indexOf("*/", i + 2);
+        i = end < 0 ? text.length : end + 1;
+        continue;
+      }
       if (ch === '"' || ch === "'" || ch === "`") quote = ch;
       else if (ch === "(") depth++;
       else if (ch === ")") depth--;
@@ -171,13 +221,28 @@ const NAMESPACED_VERBS = new Set(["link", "unlink", "overdrive", "depart"]);
 /** Trailing words that make a name a lookup: linkBonusFor, levelOf, moraleOf. */
 const LOOKUP_TAIL = new Set(["for", "of", "by", "at", "in", "on"]);
 
+/** Trailing nouns that make a name a read (startButtonRect, cursorPos) — unless it starts with a write verb (setState). */
+const NOUN_TAIL = new Set([
+  "rect", "rects", "bounds", "box", "pos", "position", "point", "xy", "center", "centre", "size", "count",
+  "state", "info", "text", "label", "list", "data", "value", "values", "snapshot", "kinds", "aim", "angle",
+]);
+const WRITE_VERBS = new Set(["set", "add", "remove", "delete", "clear", "reset", "give", "grant", "update", "apply", "put", "push", "load", "save"]);
+
+/**
+ * Verbs that set a state rather than take a step: setShield(3), addModules(2), giveCharge(50).
+ * Setup — declared with a reason in a journey, fine in a spec that screenshots a state. Every
+ * other action verb (start, commit, chart, buy, save, delete…) is a step the user takes, which
+ * a journey does with real input even when declared: a declared start() still skips the title.
+ */
+const SETTER_VERBS = new Set(["set", "add", "give", "grant", "reset", "clear", "put", "damage", "heal", "fill", "refill", "restore", "update"]);
+
 /**
  * Test hooks that set conditions rather than perform the user's actions — allowed even in
  * a journey: a fixed seed, slowed time, invincibility, feature flags, a fresh start, an
  * enemy to test against. They make a scripted run deterministic; they do not skip the flow.
  */
 const CONDITION_CALL =
-  /^(?:(?:set|enable|disable|toggle|use|with|freeze|unfreeze|pause|resume)[_A-Z]?)?(?:seed|rng|random|time|timescale|speed|clock|now|feature|features|flag|flags|godmode|invincib|immortal|cheat|difficulty)|^(?:reset|spawn|mock|stub|seed)|^(?:step|tick|advance(?:Time|Clock|Frames?)?|fastForward|skipTime)$/i;
+  /^(?:set|enable|disable|toggle|use|with|freeze|unfreeze|pause|resume)[_A-Z]?(?:seed|rng|random|time|timescale|speed|clock|now|feature|features|flag|flags|godmode|invincib|immortal|cheat|difficulty)|^(?:reset|spawn|mock|stub|seed)|^(?:step|tick|fastForward)(?:Time|Clock|Frames?|Ticks?|Seconds?|Secs?|Ms|Millis(?:econds)?|Minutes?|By|For)?$|^(?:advance|skip|warp)(?:Time|Clock|Frames?|Ticks?|Seconds?|Secs?|Ms|Millis(?:econds)?|Minutes?|By)$/i;
 
 /** Waits longer than these are usually waiting for game time to pass — a time hook does it in a blink. */
 const LONG_SLEEP_MS = 2000;
@@ -215,6 +280,7 @@ export function classifyAppCall(name: string): AppCallKind {
   if (CONDITION_CALL.test(name)) return "condition";
   const words = camelWords(name);
   if (words.length > 1 && LOOKUP_TAIL.has(words[words.length - 1]!)) return "read";
+  if (words.length > 1 && NOUN_TAIL.has(words[words.length - 1]!) && !WRITE_VERBS.has(words[0]!)) return "read";
   if (ACTION_VERBS.has(words[0]!)) return "action";
   if (words.length > 1 && NAMESPACE_WORDS.has(words[0]!) && (ACTION_VERBS.has(words[1]!) || NAMESPACED_VERBS.has(words[1]!))) return "action";
   return "read";
@@ -224,7 +290,29 @@ export function classifyAppCall(name: string): AppCallKind {
 export function appCalls(text: string): Array<{ name: string; kind: AppCallKind }> {
   const out: Array<{ name: string; kind: AppCallKind }> = [];
   for (const raw of evaluateBodies(text)) {
-    const body = stripStrings(raw);
+    const body = stripStrings(raw).replace(/\(\s*(window|globalThis|self)\s+as\s+[^)]*\)/g, "$1");
+    // Names that hold the app's surface: `const g = window.__CONVOY__`, `const { hooks } = g`.
+    const aliases = new Set<string>();
+    const holdsApp = (rhs: string) => {
+      // The object itself (window.__G__, g.hooks), not a call's result (g.hooks.wagonAim()).
+      const root = rhs.trim().match(/^([A-Za-z_$][\w$]*)(?:\s*\.\s*[\w$]+)*\s*$/)?.[1];
+      return Boolean(root && (/^(window|globalThis|self)$/.test(root) || root.startsWith("__") || aliases.has(root)));
+    };
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const m of body.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*|\{[^}]*\})\s*(?::[^=;]+)?=\s*([^;\n]+)/g)) {
+        if (!holdsApp(m[2]!)) continue;
+        const names = m[1]!.startsWith("{") ? m[1]!.slice(1, -1).split(",").map((n) => n.split(":").pop()!.trim()) : [m[1]!];
+        for (const n of names) if (n && !aliases.has(n)) (aliases.add(n), (grew = true));
+      }
+    }
+    for (const alias of aliases) {
+      const re = new RegExp(`\\b${alias.replace(/\$/g, "\\$")}((?:\\s*\\.\\s*[\\w$]+)+)\\s*\\(`, "g");
+      for (const m of body.matchAll(re)) {
+        const name = m[1]!.replace(/\s+/g, "").split(".").pop()!;
+        out.push({ name, kind: classifyAppCall(name) });
+      }
+    }
     const re = /\b(?:(?:window|globalThis|self)\s*\.\s*([\w$]+(?:\s*\.\s*[\w$]+)*)|(__[\w$]+(?:\s*\.\s*[\w$]+)*))\s*\(/g;
     for (const m of body.matchAll(re)) {
       const chain = (m[1] ?? m[2]!).replace(/\s+/g, "");
@@ -244,6 +332,27 @@ export function realInputCount(text: string): number {
   let rest = text;
   for (const body of evaluateBodies(text)) rest = rest.replace(body, "");
   return (rest.match(REAL_INPUT) ?? []).length;
+}
+
+/**
+ * Hooks a spec declares as setup, with why: `// @hooks: setShield — start at full shield; stepSeconds — skip waiting`.
+ * A journey may call these; the report lists them, so what was set up rather than played is visible.
+ */
+export function declaredHooks(text: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const m of text.matchAll(/\/\/\s*@hooks?\s*:\s*(.+)$/gm)) {
+    for (const part of m[1]!.split(";")) {
+      const d = part.trim().match(/^([A-Za-z_$][\w$]*)\s*(?:\(\))?\s*(?:—|–|-|:)\s*(\S.*)$/);
+      if (d) out.set(d[1]!, d[2]!.trim());
+    }
+  }
+  return out;
+}
+
+/** True when a hook does what the user does (start, press, buy…), whatever the spec declares. */
+export function isUserAction(name: string): boolean {
+  if (classifyAppCall(name) !== "action") return false;
+  return !SETTER_VERBS.has(camelWords(name)[0]!);
 }
 
 /** A @journey spec: the main thing a user comes to do, start to finish, through real input. */
@@ -297,20 +406,50 @@ export function scanSpecFileContent(rel: string, text: string, options: SpecScan
   // (seed, time, flags, spawn) is fine; performing the user's actions that way is not.
   const calls = appCalls(text);
   const actions = [...new Set(calls.filter((c) => c.kind === "action").map((c) => `${c.name}()`))];
-  if (isJourneySpec(text) && actions.length > 0) {
+  if (isJourneySpec(text)) {
+    // A journey: setup through hooks is fine when it is declared with a reason; doing what the
+    // user does through the app's functions is not, declared or not. Names alone no longer decide.
+    const declared = declaredHooks(text);
+    const used = [...new Set(calls.filter((c) => c.kind !== "read").map((c) => c.name))];
+    const userActs = used.filter(isUserAction);
+    const undeclared = used.filter((n) => !userActs.includes(n) && classifyAppCall(n) !== "condition" && !declared.has(n));
+    if (userActs.length > 0) {
+      warnings.push({
+        file: rel,
+        blocking: true,
+        message:
+          `@journey spec does what the user does through the app's own functions (${userActs.slice(0, 5).map((n) => `${n}()`).join(", ")}) — ` +
+          "do those steps with real input (clicks, keys, typing), even as setup.",
+      });
+    }
+    if (undeclared.length > 0) {
+      warnings.push({
+        file: rel,
+        blocking: true,
+        message:
+          `@journey spec calls app functions it does not declare (${undeclared.slice(0, 5).map((n) => `${n}()`).join(", ")}). ` +
+          "If they set conditions (a seed, time, a starting state, an enemy to fight), declare each at the top of the spec with why: " +
+          `// @hooks: ${undeclared[0]} — <what it sets up>; … If they do a step the user does, do it with real input instead.`,
+      });
+    }
+    const setup = used.filter((n) => !userActs.includes(n) && !undeclared.includes(n));
+    if (setup.length > 0) {
+      warnings.push({
+        file: rel,
+        blocking: false,
+        note: true,
+        message: `Journey setup through hooks (not played): ${setup.map((n) => (declared.has(n) ? `${n} — ${declared.get(n)}` : n)).join("; ")}`,
+      });
+    }
+  } else if (realInputCount(text) === 0 && calls.some((c) => isUserAction(c.name))) {
+    // Setting a state and screenshotting it (setShield(3), then the HUD) is fine; doing the
+    // user's steps through the app's functions with no real input at all is not.
+    const userActs = [...new Set(calls.filter((c) => isUserAction(c.name)).map((c) => `${c.name}()`))];
     warnings.push({
       file: rel,
       blocking: true,
       message:
-        `@journey spec performs user actions through the app's own functions (${actions.slice(0, 5).join(", ")}) — ` +
-        "a journey must reach every step with real input (clicks, keys, typing). Test hooks may only set conditions: seed, time scale, flags, spawn, reset.",
-    });
-  } else if (actions.length > 0 && realInputCount(text) === 0) {
-    warnings.push({
-      file: rel,
-      blocking: true,
-      message:
-        `Spec drives the app only through its own functions (${actions.slice(0, 5).join(", ")}) and never uses its UI — ` +
+        `Spec drives the app only through its own functions (${userActs.slice(0, 5).join(", ")}) and never uses its UI — ` +
         "it proves the logic, not that a person can do it. Do the user's actions with real clicks/keys; keep hooks for setup (seed, flags, spawn) and reads.",
     });
   }
@@ -421,14 +560,19 @@ export function findJourneySpecs(cwd: string, config: ScenariosConfig): string[]
 
 export function formatSpecPatternWarnings(warnings: SpecPatternWarning[]): string[] {
   if (warnings.length === 0) return [];
-  const lines = ["WEAK SPEC PATTERNS (fix before trusting pass):"];
-  for (const w of warnings) {
-    const tag = w.blocking ? "BLOCKING" : "hint";
-    lines.push(`  - [${tag}] ${w.file}`);
-    lines.push(`    ${w.message}`);
+  const lines: string[] = [];
+  const weak = warnings.filter((w) => !w.note);
+  if (weak.length) {
+    lines.push("WEAK SPEC PATTERNS (fix before trusting pass):");
+    for (const w of weak) {
+      const tag = w.blocking ? "BLOCKING" : "hint";
+      lines.push(`  - [${tag}] ${w.file}`);
+      lines.push(`    ${w.message}`);
+    }
+    lines.push("  → Helpers: .pi/scenarios/helpers/canvas-interaction.ts in THIS repo");
+    lines.push("  → scrollAndCapture(page, { beforePath, afterPath, wheelDy, dragDy })");
   }
-  lines.push("  → Helpers: .pi/scenarios/helpers/canvas-interaction.ts in THIS repo");
-  lines.push("  → scrollAndCapture(page, { beforePath, afterPath, wheelDy, dragDy })");
+  for (const w of warnings.filter((x) => x.note)) lines.push(`${w.file}: ${w.message}`);
   return lines;
 }
 

@@ -686,7 +686,7 @@ export default function (pi: ExtensionAPI) {
           pi.sendUserMessage(
             `Result bar is **product**, and no @journey spec exists (attempt ${fixAttempts}/${config.maxFixAttempts}). ` +
               `Write one under ${config.scenariosDir}: the main thing a user comes to do, start to finish, every step through real input ` +
-              `(clicks, keys, typing — no app functions for the user's actions; hooks only for seed/time/flags/spawn/reset). ` +
+              `(clicks, keys, typing — no app functions for the user's actions; hooks only to set conditions, each declared as // @hooks: name — why). ` +
               `Title ends with @journey. Then run_scenarios. If a step cannot be done through the UI, that is the bug to fix.`,
             { deliverAs: "followUp" },
           );

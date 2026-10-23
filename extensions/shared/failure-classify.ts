@@ -17,6 +17,7 @@ export type FailureLabel =
   | "lint_fail"
   | "build_fail"
   | "test_fail"
+  | "load_flake"
   | "unknown";
 
 export interface ClassifiedFailure {
@@ -183,6 +184,14 @@ export function classifyVerifyFailure(report: string): ClassifiedFailure {
       label: "build_fail",
       evidence: firstMatchLine(report, /error TS|error\[|Build FAILED|error CS/i) ?? "Build/typecheck failed.",
       next: "Fix compile/type errors; re-run verify.",
+      raw,
+    };
+  }
+  if (/LOAD-DEPENDENT:/.test(report)) {
+    return {
+      label: "load_flake",
+      evidence: firstMatchLine(report, /LOAD-DEPENDENT:/) ?? "Tests fail only under parallel load.",
+      next: "These pass alone: fix the timing assumption in the test (wait for the state, or use the time hook). Do not just rerun, and do not lower the parallelism to hide it.",
       raw,
     };
   }

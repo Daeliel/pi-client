@@ -4,7 +4,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DEFAULT_CONFIG } from "./config";
-import { allSkippedForMissingTools, isPlaceholderTestScript, partitionScopes, verify } from "./engine";
+import { allSkippedForMissingTools, isPlaceholderTestScript, loadDependent, partitionScopes, playwrightFailures, verify } from "./engine";
+import { classifyVerifyFailure } from "../shared/failure-classify";
 
 function tempProject(files: Record<string, string>): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "verify-engine-"));
@@ -109,5 +110,30 @@ describe("verify scopes", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("tests that fail only under load", () => {
+  const RUN = [
+    String.raw`  [90/93] .pi\scenarios\wagon-guns.spec.ts:45:3 › wagon guns › hold fire`,
+    "  2 failed",
+    String.raw`    [chromium] › .pi\scenarios\convoy.spec.ts:45:3 › convoy › bends behind the head`,
+    String.raw`    [chromium] › .pi\scenarios\follow.spec.ts:12:7 › follow › settles`,
+    "  91 passed (1.2m)",
+  ].join("\n");
+
+  it("reads the failed tests from Playwright's summary, not the progress lines", () => {
+    assert.deepEqual(playwrightFailures(RUN), [".pi/scenarios/convoy.spec.ts:45", ".pi/scenarios/follow.spec.ts:12"]);
+    assert.deepEqual(playwrightFailures("FAIL src/a.test.ts\n  ✕ adds"), [], "not Playwright: nothing to rerun");
+  });
+
+  it("passing alone means load-dependent; failing alone too means a real failure", async () => {
+    const cwd = os.tmpdir();
+    let asked: string[] = [];
+    const pass = await loadDependent(RUN, cwd, 20000, undefined, (t) => ((asked = t), "node -e \"process.exit(0)\""));
+    assert.deepEqual(asked, [".pi/scenarios/convoy.spec.ts:45", ".pi/scenarios/follow.spec.ts:12"]);
+    assert.match(pass ?? "", /^LOAD-DEPENDENT: .*convoy\.spec\.ts:45.*pass when run alone/);
+    assert.equal(classifyVerifyFailure(`${pass}\n\n${RUN}`).label, "load_flake");
+    assert.equal(await loadDependent(RUN, cwd, 20000, undefined, () => "node -e \"process.exit(1)\""), null);
   });
 });

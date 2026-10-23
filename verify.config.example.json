@@ -4,6 +4,8 @@
   "maxFixAttempts": 5,
   "timeoutMs": 120000,
   "verifyOnEdit": true,
+  "_rerunFlakes": "When Playwright tests inside the test command fail, rerun just those alone (--workers=1). Ones that pass alone are reported as LOAD-DEPENDENT (label load_flake) — still a failure.",
+  "rerunFlakes": true,
   "languages": {
     "python": {
       "enabled": true,
