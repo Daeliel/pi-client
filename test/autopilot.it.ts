@@ -6,6 +6,8 @@ import * as path from "node:path";
 import autopilotExt from "../extensions/autopilot/index";
 import planExt from "../extensions/plan/index";
 import { addSource } from "../extensions/plan/sources";
+import playtestExt from "../extensions/playtest/index";
+import { playtestOn, setPlaytestSession } from "../extensions/shared/playtest";
 import { APP_VERIFY_CONFIG, call, createHarness, reply, seenBy, writeProjectConfig } from "./harness";
 
 const BLUEPRINT = ".pi/blueprint/BLUEPRINT.md";
@@ -91,6 +93,50 @@ describe("autopilot", () => {
       assert.equal(run.finished, 2);
       assert.equal(h.faux.getPendingResponseCount(), 1, "quiet once the scope is done");
     } finally {
+      h.dispose();
+    }
+  });
+
+  it("starting a run turns playtest mode off: the brief sees the checks, not hand_over, and the change is saved", async () => {
+    const notes: string[] = [];
+    const h = await createHarness({
+      extensions: [planExt, autopilotExt, playtestExt],
+      files: { [BLUEPRINT]: BP },
+      ui: { ...approvingUi(), notify: ((m: string) => void notes.push(m)) as never },
+    });
+    try {
+      seedSources(h.cwd);
+      writeProjectConfig(h.cwd, "verify.config.json", APP_VERIFY_CONFIG);
+      writeProjectConfig(h.cwd, "autopilot.config.json", { checkpoints: false });
+      await h.session.prompt("/playtest on");
+      assert.ok(playtestOn());
+      let seen = { tools: [] as string[], systemPrompt: "" };
+      h.faux.setResponses([
+        (context) => {
+          seen = seenBy(context);
+          return call("write", { path: "a.app", content: "fixed" });
+        },
+        reply("R-01 done"),
+        call("write", { path: "b.app", content: "done" }),
+        reply("R-02 done"),
+        reply("unused"),
+      ]);
+      await h.session.prompt("/autopilot");
+      await h.settle();
+      assert.ok(!playtestOn());
+      assert.ok(notes.some((n) => /Playtest mode off — autopilot works with the checks/.test(n)));
+      assert.ok(seen.tools.includes("finish_autopilot"), "autopilot's own tools are back");
+      assert.ok(!seen.tools.includes("hand_over"));
+      assert.doesNotMatch(seen.systemPrompt, /## Playtest mode/);
+      const saved = h.session.sessionManager
+        .getBranch()
+        .filter((e) => e.type === "custom" && e.customType === "pi-client-playtest")
+        .map((e) => (e as { data?: { session?: boolean } }).data?.session);
+      assert.equal(saved.at(-1), false, "a restart does not bring playtest back");
+      const run = JSON.parse(fs.readFileSync(path.join(h.cwd, ".pi/blueprint/run.json"), "utf8"));
+      assert.equal(run.finished, 2);
+    } finally {
+      setPlaytestSession(false);
       h.dispose();
     }
   });

@@ -44,6 +44,16 @@ export function endPlaytestOnce(): void {
   state().once = false;
 }
 
+/**
+ * Autopilot needs its gates: starting or resuming a run turns playtest off (session and once).
+ * True when it was on. The playtest extension notices and saves the change on its next sync.
+ */
+export function turnOffPlaytest(): boolean {
+  const was = playtestOn();
+  setPlaytestSession(false);
+  return was;
+}
+
 /** Tools that check or gate work — hidden while playtest is on. */
 export const GATED_TOOLS = new Set([
   "verify",

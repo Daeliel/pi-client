@@ -50,6 +50,7 @@ import { loadVisionImages } from "../scenarios/vision";
 import { presentVisionToSession } from "../shared/vision-relay";
 import { extractEditPath, isEditTool } from "../shared/edit-tools";
 import { isGateClaimed, registerGateReset, tryClaimGate } from "../shared/gate-orchestrator";
+import { turnOffPlaytest } from "../shared/playtest";
 import { syncOwnedTools } from "../shared/tool-activation";
 import { withGateWorkingMessage } from "../shared/working-status";
 
@@ -302,7 +303,12 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  type StartOutcome = { started: true; first: BlueprintItem | null; note: string; startedBefore: boolean } | { started: false; reason: string; disable?: boolean };
+  /** A run works through the gates; playtest mode hides them, so starting or resuming ends it. */
+  function leavePlaytest(ctx: ExtensionContext) {
+    if (turnOffPlaytest()) notify(ctx, "Playtest mode off — autopilot works with the checks. /playtest on again after the run.");
+  }
+
+  type StartOutcome ={ started: true; first: BlueprintItem | null; note: string; startedBefore: boolean } | { started: false; reason: string; disable?: boolean };
 
   /** Approval dialog (or headless defaults), checkpoints setup, run state. */
   async function approveAndStart(ctx: ExtensionContext, goalHint: string, scopeHint?: AutopilotScope): Promise<StartOutcome> {
@@ -411,6 +417,7 @@ export default function (pi: ExtensionAPI) {
     segmentStart = Date.now();
     finishRequested = false;
     setPlanning(false);
+    leavePlaytest(ctx);
     // The blueprint decided what done means; let the scenarios gate (journeys) agree.
     if (bp.parsed.bar && loadScenariosConfig(ctx.cwd).bar === "unset") persistResultBar(ctx.cwd, bp.parsed.bar);
     await settleStarted(ctx, items);
@@ -872,6 +879,7 @@ export default function (pi: ExtensionAPI) {
         run.stopReason = undefined;
         run.stalls = 0;
         segmentStart = Date.now();
+        leavePlaytest(ctx);
         const before = reconcile(ctx);
         if (before) await settleStarted(ctx, before.items);
         const state = reconcile(ctx);

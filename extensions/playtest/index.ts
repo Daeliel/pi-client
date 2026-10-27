@@ -62,8 +62,11 @@ export default function (pi: ExtensionAPI) {
   let testsAllowed = false;
   /** Gated tools taken out of the active list, to give back when playtest ends. */
   const hidden = new Set<string>();
+  /** The session flag as last saved — autopilot can turn playtest off from outside. */
+  let saved = false;
 
   function syncTools() {
+    if (playtestSession() !== saved) persist();
     const active = pi.getActiveTools();
     if (playtestOn()) {
       const keep = active.filter((t) => !GATED_TOOLS.has(t));
@@ -80,7 +83,8 @@ export default function (pi: ExtensionAPI) {
   }
 
   function persist() {
-    pi.appendEntry(STATE_TYPE, { session: playtestSession() });
+    saved = playtestSession();
+    pi.appendEntry(STATE_TYPE, { session: saved });
   }
 
   registerOnceModifier({
@@ -96,6 +100,7 @@ export default function (pi: ExtensionAPI) {
         setPlaytestSession(Boolean((entry.data as { session?: boolean } | undefined)?.session));
       }
     }
+    saved = playtestSession();
     syncTools();
   });
 
