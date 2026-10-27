@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ensureAgentsMd, renderAgentsMd } from "./agents-md";
+import { ensureAgentsMd, isTopLevelFolder, renderAgentsMd } from "./agents-md";
 
 function project(files: Record<string, string>): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-md-"));
@@ -45,5 +45,14 @@ describe("AGENTS.md scaffold", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+  it("never writes into a drive root or the home folder: pi was started outside a project", () => {
+    const root = path.parse(process.cwd()).root;
+    assert.ok(isTopLevelFolder(root));
+    assert.ok(isTopLevelFolder(os.homedir()));
+    assert.ok(!isTopLevelFolder(process.cwd()));
+    const r = ensureAgentsMd(root);
+    assert.equal(r.created, false);
+    assert.equal(r.topLevel, true);
   });
 });

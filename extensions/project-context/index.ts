@@ -18,6 +18,18 @@ export default function (pi: ExtensionAPI) {
     if (!AUTO_SCAFFOLD_REASONS.has(event.reason)) return;
 
     const result = ensureAgentsMd(ctx.cwd);
+    if (result.topLevel && ctx.hasUI) {
+      ctx.ui.notify(
+        `Pi started in ${ctx.cwd}, which is not a project folder. Checks, specs and project notes work per project — ` +
+          "quit and start Pi inside the project (e.g. cd D:\\work\\my-app; pi).",
+        "warning",
+      );
+      return;
+    }
+    if (result.notWritable && ctx.hasUI) {
+      ctx.ui.notify(`Could not create ${result.path} (${result.skippedReason}) — skipped project notes. Pi works as usual.`, "info");
+      return;
+    }
     if (!result.created || !result.path) return;
 
     pendingAgentsInject = result.path;

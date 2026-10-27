@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { detectStacks } from "./stack-detect";
 
@@ -17,6 +18,16 @@ export interface EnsureAgentsMdResult {
   created: boolean;
   path: string | null;
   skippedReason?: string;
+  /** Pi was started in a drive root or the home folder — not a project. */
+  topLevel?: boolean;
+  /** The project folder could not be written to (read-only, no permission). */
+  notWritable?: boolean;
+}
+
+/** A drive root (C:\, /) or the user's home folder: pi started there, not in a project. */
+export function isTopLevelFolder(dir: string): boolean {
+  const d = path.resolve(dir);
+  return path.dirname(d) === d || d.toLowerCase() === path.resolve(os.homedir()).toLowerCase();
 }
 
 function findGitRoot(start: string): string | null {
@@ -131,6 +142,9 @@ export function renderAgentsMd(projectRoot: string, platform: NodeJS.Platform = 
  * Skips pi-client foundation repo and dirs that already have context files upstream.
  */
 export function ensureAgentsMd(cwd: string): EnsureAgentsMdResult {
+  if (isTopLevelFolder(cwd)) {
+    return { created: false, path: null, skippedReason: "started in a drive root or home folder", topLevel: true };
+  }
   const projectRoot = resolveProjectRoot(cwd);
   if (!projectRoot) {
     return { created: false, path: null, skippedReason: "not a recognized project directory" };
@@ -150,6 +164,11 @@ export function ensureAgentsMd(cwd: string): EnsureAgentsMdResult {
     return { created: false, path: target, skippedReason: "AGENTS.md already exists" };
   }
 
-  fs.writeFileSync(target, renderAgentsMd(projectRoot), "utf8");
+  try {
+    fs.writeFileSync(target, renderAgentsMd(projectRoot), "utf8");
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code ?? "error";
+    return { created: false, path: target, skippedReason: `cannot write here (${code})`, notWritable: true };
+  }
   return { created: true, path: target };
 }
