@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+
 /**
  * Which tool calls count as file edits, and which edited files count as code.
  * Shared by every gate so they agree on what "the model changed something" means.
@@ -9,13 +11,30 @@ export function isEditTool(toolName: string): boolean {
   return EDIT_TOOLS.has(toolName);
 }
 
+/**
+ * A Git-Bash style path on Windows — `/d/work/x` — means `D:\work\x`. Pi's file tools accept
+ * it; Node's path.resolve reads it as `C:\d\work\x`, so every gate would look in the wrong place.
+ */
+export function normalizeToolPath(p: string, platform: string = process.platform): string {
+  if (platform !== "win32") return p;
+  const m = p.match(/^\/([a-zA-Z])(\/.*)?$/);
+  if (!m) return p;
+  const drive = `${m[1]!.toUpperCase()}:`;
+  try {
+    if (!fs.existsSync(`${drive}\\`)) return p;
+  } catch {
+    return p;
+  }
+  return `${drive}${(m[2] ?? "/").replace(/\//g, "\\")}`;
+}
+
 /** Pull a file path out of an edit/write tool input, whatever the field is named. */
 export function extractEditPath(input: unknown): string | null {
   if (!input || typeof input !== "object") return null;
   const obj = input as Record<string, unknown>;
   for (const key of ["path", "file_path", "filePath", "filename", "file"]) {
     const v = obj[key];
-    if (typeof v === "string" && v.length > 0) return v;
+    if (typeof v === "string" && v.length > 0) return normalizeToolPath(v);
   }
   return null;
 }

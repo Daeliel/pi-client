@@ -99,6 +99,25 @@ describe("verify scopes", () => {
     }
   });
 
+  it("a file outside pi's folder is checked in its own project, whatever isolateSubprojects says", () => {
+    const dir = tree({ "pi-home/readme.txt": "", "Zalihe/.git/HEAD": "", "Zalihe/.pi/scenarios/test_bridge.py": "", "loose/x.py": "" });
+    try {
+      const home = path.join(dir, "pi-home");
+      const file = path.join(dir, "Zalihe", ".pi", "scenarios", "test_bridge.py");
+      for (const isolate of [true, false]) {
+        const [scope] = partitionScopes(home, [file], isolate);
+        assert.equal(scope!.cwd, path.join(dir, "Zalihe"), "the .git project, not pi's folder");
+        assert.deepEqual(scope!.relFiles, [".pi/scenarios/test_bridge.py"]);
+        assert.ok(scope!.label.endsWith("Zalihe/"));
+      }
+      const [loose] = partitionScopes(home, [path.join(dir, "loose", "x.py")], true);
+      assert.equal(loose!.cwd, path.join(dir, "loose"), "no project above: the file's own folder, never a whole drive");
+      assert.deepEqual(partitionScopes(home, [], true), [{ cwd: home, relFiles: [], label: "" }], "a whole-project run stays at pi's folder");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("real subprojects keep their own scope; loose files fall back to the root", () => {
     const dir = tree({ "app-a/package.json": "{}", "app-a/src/x.ts": "", "app-b/pyproject.toml": "", "app-b/y.py": "", "notes/todo.ts": "" });
     try {

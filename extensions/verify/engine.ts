@@ -1,5 +1,6 @@
 import { clipMiddle, plainOutputEnv, stripAnsi } from "../shared/output";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { VerifyConfig, LanguageConfig } from "./config";
 import { runCommand } from "../shared/run-command";
@@ -167,40 +168,62 @@ interface WorkScope {
  */
 export function partitionScopes(piCwd: string, files: string[], isolate: boolean): WorkScope[] {
   const root = path.resolve(piCwd);
-  const toRel = (abs: string) => path.relative(root, abs).split(path.sep).join("/");
-
-  if (!isolate || files.length === 0) {
-    const relFiles = files.map((f) => (path.isAbsolute(f) ? toRel(path.resolve(f)) : f.replace(/\\/g, "/")));
-    return [{ cwd: root, relFiles, label: "" }];
-  }
-
+  const posix = (p: string) => p.split(path.sep).join("/");
   const buckets = new Map<string, string[]>();
+  const add = (dir: string, file: string) => {
+    if (!buckets.has(dir)) buckets.set(dir, []);
+    buckets.get(dir)!.push(file);
+  };
 
+  // A file outside the folder pi started in (another drive, or above it) is checked in its own
+  // project: running from pi's folder would lint a path that does not resolve there and let
+  // pytest scan a whole drive.
+  const inside: string[] = [];
   for (const raw of files) {
     const abs = path.resolve(root, raw);
     const rel = path.relative(root, abs);
-    if (rel.startsWith("..") || rel === "") {
-      const key = root;
-      if (!buckets.has(key)) buckets.set(key, []);
-      buckets.get(key)!.push(rel || path.basename(abs));
-      continue;
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+      const dir = ownProjectDir(path.dirname(abs));
+      add(dir, posix(path.relative(dir, abs)));
+    } else {
+      inside.push(raw);
     }
-    // The file belongs to the nearest folder above it that is a project — not to its
-    // first path segment: src/main.ts in a root package.json project is the root's.
-    const scopeDir = nearestProjectDir(path.dirname(abs), root);
-    const scopeRel = path.relative(scopeDir, abs);
-    if (!buckets.has(scopeDir)) buckets.set(scopeDir, []);
-    buckets.get(scopeDir)!.push(scopeRel.split(path.sep).join("/"));
+  }
+
+  if (!isolate || inside.length === 0) {
+    if (inside.length > 0 || buckets.size === 0) {
+      if (!buckets.has(root)) buckets.set(root, []);
+      for (const f of inside) buckets.get(root)!.push(path.isAbsolute(f) ? posix(path.relative(root, path.resolve(f))) : f.replace(/\\/g, "/"));
+    }
+  } else {
+    for (const raw of inside) {
+      const abs = path.resolve(root, raw);
+      const rel = path.relative(root, abs);
+      if (rel === "") {
+        add(root, path.basename(abs));
+        continue;
+      }
+      // The file belongs to the nearest folder above it that is a project — not to its
+      // first path segment: src/main.ts in a root package.json project is the root's.
+      const scopeDir = nearestProjectDir(path.dirname(abs), root);
+      add(scopeDir, posix(path.relative(scopeDir, abs)));
+    }
   }
 
   return Array.from(buckets.entries()).map(([scopeCwd, relFiles]) => {
     const relLabel = path.relative(root, scopeCwd);
-    return {
-      cwd: scopeCwd,
-      relFiles,
-      label: relLabel ? `${relLabel.split(path.sep).join("/")}/` : "",
-    };
+    const label = !relLabel ? "" : relLabel.startsWith("..") || path.isAbsolute(relLabel) ? `${posix(scopeCwd)}/` : `${posix(relLabel)}/`;
+    return { cwd: scopeCwd, relFiles, label };
   });
+}
+
+/** The project a file outside pi's folder belongs to: the nearest folder above it with a project marker or .git. */
+function ownProjectDir(dir: string): string {
+  const home = path.resolve(os.homedir());
+  for (let d = dir; ; d = path.dirname(d)) {
+    if (path.dirname(d) === d || path.resolve(d) === home) return dir; // a drive or home is never "the project"
+    if (isProjectDir(d) || fileExists(d, ".git")) return d;
+  }
 }
 
 function readPackageJson(cwd: string): { scripts?: Record<string, string>; eslintConfig?: unknown } | null {
@@ -430,6 +453,8 @@ async function runCheck(
     const note = await loadDependent(r.out, cwd, timeoutMs, signal);
     if (note) output = `${note}\n\n${r.out}`;
   }
+  // A failure says what ran where: a wrong folder or path is then visible, not guessed at.
+  if (r.code !== 0) output = `$ ${prepared.command}   (in ${cwd})\n${output}`;
   return {
     language,
     kind,

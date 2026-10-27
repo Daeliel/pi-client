@@ -128,6 +128,7 @@ export default function (pi: ExtensionAPI) {
   // 3) Hard gate: do not let the agent settle idle while full verification fails.
   pi.on("agent_end", async (_event, ctx) => {
     if (playtestOn()) return; // playtest mode: the user is the check
+    configCache = null; // a config written during the run counts now, not at the next prompt
     const config = cfg(ctx);
     if (!config.blocking || changedFiles.size === 0) return;
 
@@ -206,6 +207,7 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
+      configCache = null; // re-read: the model may have just written verify.config.json
       const config = cfg(ctx);
       const files = params.scope === "project" ? [] : [...changedFiles];
       const result = await verify(ctx.cwd, files, config, undefined, signal);
