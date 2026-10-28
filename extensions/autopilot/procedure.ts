@@ -1,5 +1,6 @@
 import type { BlueprintItem } from "../plan/blueprint";
 import { formatMinutes } from "../plan/procedure";
+import { clipMiddle } from "../shared/output";
 
 export { formatMinutes };
 
@@ -52,8 +53,10 @@ ${report}
 ${ASSUMPTION_RULE}`;
 }
 
-export function buildStallNudge(item: BlueprintItem, stops: number, max: number): string {
-  return `AUTOPILOT — you stopped without changing anything (${stops}/${max}). Continue with ${item.id}: ${item.title}. ${ASSUMPTION_RULE} If ${item.id} truly cannot be built here, call defer_items with a one-line reason and the run moves on.`;
+/** `report`: why the evidence does not pass yet (null for a manual item). */
+export function buildStallNudge(item: BlueprintItem, stops: number, max: number, report: string | null): string {
+  const evidence = report ? `\n${item.id}'s evidence does not pass yet:\n${clipMiddle(report, 1500)}\n` : " ";
+  return `AUTOPILOT — you stopped without changing anything (${stops}/${max}). Continue with ${item.id}: ${item.title}.${evidence}Change files with edit or write — changes made through bash are not seen as progress. ${ASSUMPTION_RULE} If ${item.id} truly cannot be built here, call defer_items with a one-line reason and the run moves on; at ${max} stops it is marked blocked.`;
 }
 
 export function buildReplan(minutesLeft: number, open: BlueprintItem[]): string {

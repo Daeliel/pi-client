@@ -13,7 +13,10 @@ export interface AutopilotConfig {
   headless: "allow" | "deny";
   /** Proving failures on one item before it is marked blocked and the run moves on. */
   itemAttempts: number;
-  /** Stops in a row without any edit before the run pauses (the model cannot make progress). */
+  /**
+   * Stops in a row with no edit and failing evidence before the item is marked blocked and the
+   * run moves on. Three items blocked this way in a row pause the run.
+   */
   stallStops: number;
   /** Scope offered first in the approval dialog. */
   defaultScope: AutopilotScope;

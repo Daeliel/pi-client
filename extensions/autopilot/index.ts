@@ -58,6 +58,9 @@ const TOOLS = ["start_autopilot", "defer_items", "finish_autopilot"];
 
 const RUN_FILE = ".pi/blueprint/run.json";
 
+/** Items in a row blocked for no progress before the run pauses. */
+const STALLED_ITEMS_BEFORE_PAUSE = 3;
+
 /** Run settings and bookkeeping. Progress itself lives in the blueprint's marks. */
 interface RunState {
   status: "running" | "paused" | "done";
@@ -76,6 +79,8 @@ interface RunState {
   manualBuilt: string[];
   current: string | null;
   stalls: number;
+  /** Items blocked in a row for making no progress — enough of them pauses the run. */
+  stalledInRow?: number;
   /** Items finished (done, blocked or manual-built) in this run — the budget's pace. */
   finished: number;
   /** `finished` at the last re-plan request (one request per finished count). */
@@ -552,27 +557,44 @@ export default function (pi: ExtensionAPI) {
         const item = state.items.find((i) => i.id === r.current);
         if (!item || item.mark === "-") {
           r.current = null; // deleted or deferred while building
-        } else if (editSerial === editsAtBrief) {
-          r.stalls += 1;
-          saveRun(ctx);
-          if (r.stalls >= config.stallStops) {
-            stopRun(ctx, "paused", `no progress on ${item.id} after ${r.stalls} stops`, state.items);
-            return;
-          }
-          if (!tryClaimGate("autopilot")) return;
-          pi.sendUserMessage(buildStallNudge(item, r.stalls, config.stallStops), { deliverAs: "followUp" });
-          return;
         } else {
+          // Prove even when no edit tool ran: files changed through bash, or work an earlier
+          // item already did, count as soon as the evidence passes.
+          const edited = editSerial !== editsAtBrief;
           status.step(`proving ${item.id}`);
           const proof = await proveItem(ctx.cwd, item, ctx.signal, (t) => status.step(t));
           if (ctx.signal?.aborted) return;
-          r.stalls = 0;
-          if (proof.manual) {
+          if (!edited && !proof.ok) {
+            r.stalls += 1;
+            if (r.stalls < config.stallStops) {
+              saveRun(ctx);
+              if (!tryClaimGate("autopilot")) return;
+              pi.sendUserMessage(buildStallNudge(item, r.stalls, config.stallStops, proof.manual ? null : proof.report), { deliverAs: "followUp" });
+              return;
+            }
+            // One stuck item must not end an unattended run: block it and move on. Several in a
+            // row is the model or its server, not the item — then pause.
+            r.stalledInRow = (r.stalledInRow ?? 0) + 1;
+            mark(ctx, item.id, "!", `no progress after ${r.stalls} stops`);
+            await checkpoint(ctx, item, true);
+            r.current = null;
+            r.finished += 1;
+            r.stalls = 0;
+            if (r.stalledInRow >= STALLED_ITEMS_BEFORE_PAUSE) {
+              stopRun(ctx, "paused", `no progress on ${r.stalledInRow} items in a row (last: ${item.id})`, reconcile(ctx)?.items);
+              return;
+            }
+            notify(ctx, `Autopilot: ${item.id} blocked — no progress after ${config.stallStops} stops. Moving on.`, "warning");
+          } else if (proof.manual) {
+            r.stalls = 0;
+            r.stalledInRow = 0;
             if (!r.manualBuilt.includes(item.id)) r.manualBuilt.push(item.id);
             await checkpoint(ctx, item, false);
             r.current = null;
             r.finished += 1;
           } else if (proof.ok) {
+            r.stalls = 0;
+            r.stalledInRow = 0;
             mark(ctx, item.id, "x");
             r.attempts[item.id] = 0;
             await checkpoint(ctx, item, false);
@@ -580,6 +602,8 @@ export default function (pi: ExtensionAPI) {
             r.finished += 1;
             notify(ctx, `Autopilot: ${item.id} done.`);
           } else {
+            r.stalls = 0;
+            r.stalledInRow = 0;
             r.attempts[item.id] = (r.attempts[item.id] ?? 0) + 1;
             const attempt = r.attempts[item.id]!;
             if (attempt >= config.itemAttempts) {

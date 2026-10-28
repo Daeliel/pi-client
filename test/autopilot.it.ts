@@ -222,7 +222,7 @@ describe("autopilot", () => {
     }
   });
 
-  it("'Don't offer again this session' hides the tool; a stop without edits is nudged, then paused", async () => {
+  it("'Don't offer again this session' hides the tool; a stop without edits is nudged, then the item is blocked and the run moves on", async () => {
     const h = await createHarness({
       extensions: [planExt, autopilotExt],
       files: { [BLUEPRINT]: BP },
@@ -256,20 +256,73 @@ describe("autopilot", () => {
       h2.faux.setResponses([
         call("start_autopilot", { goal: "app" }),
         reply("Which colour should the app use?"), // a question, no edits
-        reply("Still thinking."), // second stop without edits -> paused
+        reply("Still thinking."), // second stop without edits -> R-01 blocked, run moves on
+        reply("Hmm."),
+        reply("Not sure."), // R-02 blocked too
         reply("unused"),
       ]);
       await h2.session.prompt("build all of it");
       await h2.settle();
       const users = h2.userMessages();
-      assert.equal(startsWith(users, "AUTOPILOT — you stopped without changing anything (1/2)"), 1);
-      assert.match(users.find((m) => m.startsWith("AUTOPILOT — you stopped"))!, /choose what you would recommend/);
+      assert.equal(startsWith(users, "AUTOPILOT — you stopped without changing anything (1/2). Continue with R-01"), 1);
+      assert.equal(startsWith(users, "AUTOPILOT — you stopped without changing anything (1/2). Continue with R-02"), 1);
+      const nudge = users.find((m) => m.startsWith("AUTOPILOT — you stopped"))!;
+      assert.match(nudge, /choose what you would recommend/);
+      assert.match(nudge, /evidence does not pass yet/);
+      const bp = readBp(h2.cwd);
+      assert.match(bp, /- \[!\] \*\*R-01\*\*.*· blocked: no progress after 2 stops/);
+      assert.match(bp, /- \[!\] \*\*R-02\*\*.*· blocked: no progress after 2 stops/);
       const run = JSON.parse(fs.readFileSync(path.join(h2.cwd, ".pi/blueprint/run.json"), "utf8"));
-      assert.equal(run.status, "paused");
-      assert.match(run.stopReason, /no progress on R-01/);
+      assert.equal(run.status, "done");
       assert.equal(h2.faux.getPendingResponseCount(), 1);
     } finally {
       h2.dispose();
+    }
+  });
+
+  it("three items in a row with no progress pause the run: that is the model, not the items", async () => {
+    const bp3 = `${BP}- [ ] **R-03** b.app also records the third step · serves: S-02 · proves: verify\n`;
+    const h = await createHarness({ extensions: [planExt, autopilotExt], files: { [BLUEPRINT]: bp3 }, ui: approvingUi() });
+    try {
+      seedSources(h.cwd);
+      writeProjectConfig(h.cwd, "verify.config.json", APP_VERIFY_CONFIG);
+      writeProjectConfig(h.cwd, "autopilot.config.json", { checkpoints: false, stallStops: 1 });
+      h.faux.setResponses([call("start_autopilot", { goal: "app" }), reply("…"), reply("…"), reply("…"), reply("unused")]);
+      await h.session.prompt("build all of it");
+      await h.settle();
+      const run = JSON.parse(fs.readFileSync(path.join(h.cwd, ".pi/blueprint/run.json"), "utf8"));
+      assert.equal(run.status, "paused");
+      assert.match(run.stopReason, /no progress on 3 items in a row \(last: R-03\)/);
+      assert.equal(h.faux.getPendingResponseCount(), 1);
+    } finally {
+      h.dispose();
+    }
+  });
+
+  it("work done through bash counts once its evidence passes", async () => {
+    const h = await createHarness({ extensions: [planExt, autopilotExt], files: { [BLUEPRINT]: BP }, ui: approvingUi() });
+    try {
+      seedSources(h.cwd);
+      writeProjectConfig(h.cwd, "verify.config.json", APP_VERIFY_CONFIG);
+      writeProjectConfig(h.cwd, "autopilot.config.json", { checkpoints: false });
+      h.faux.setResponses([
+        call("start_autopilot", { goal: "app" }),
+        call("bash", { command: `node -e "require('fs').writeFileSync('a.app','fixed')"` }),
+        reply("R-01 done"), // no edit tool ran, but the evidence passes
+        reply("R-02 already passes"), // nothing to change: proven as it stands
+        reply("unused"),
+      ]);
+      await h.session.prompt("build it all");
+      await h.settle();
+      const users = h.userMessages();
+      assert.equal(startsWith(users, "AUTOPILOT — you stopped"), 0, users.join("\n---\n"));
+      const bp = readBp(h.cwd);
+      assert.match(bp, /- \[x\] \*\*R-01\*\*/);
+      assert.match(bp, /- \[x\] \*\*R-02\*\*/);
+      const run = JSON.parse(fs.readFileSync(path.join(h.cwd, ".pi/blueprint/run.json"), "utf8"));
+      assert.equal(run.status, "done");
+    } finally {
+      h.dispose();
     }
   });
 
