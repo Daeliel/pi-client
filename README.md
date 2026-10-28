@@ -17,7 +17,7 @@ Any OpenAI-compatible server works; those two are simply what the guardrails are
 
 ## What's in the box
 
-Fifteen Pi extensions, three skills, four prompt templates, and a config layering system.
+Seventeen Pi extensions, three skills, four prompt templates, and a config layering system.
 
 ### Extensions
 
@@ -36,6 +36,8 @@ Fifteen Pi extensions, three skills, four prompt templates, and a config layerin
 | **autopilot** | Carries a build through to completion without you saying "continue". `/blueprint <what to build>` writes a **blueprint** — goal, tiers (`v1` smallest usable version, then `v2`, `later`), one checkable item per line naming what proves it (a spec, `verify`, or `manual`) — from your prompt, a design doc, your images, or image search. When you ask for the whole thing, the model calls `start_autopilot`; you approve once (scope, optional time budget that shapes the plan), then it builds item by item. An item is done only when its evidence passes; failing items are retried, then marked blocked so the run moves on; questions become recorded assumptions; an early "done" is checked. Status marks are set by the extension from evidence, never by hand. With git, each item is a commit on an `autopilot/<goal>` branch (`/autopilot rollback <id>`). A resumed or restarted run first proves items left in progress, so finished work is recorded rather than built again. `/autopilot pause\|resume\|status\|off` |
 | **status** | One line above the editor while the agent works: `Implementing colour change · editing (2 files) · ~50%` — the step from the model (`status` tool), the phase from what it is doing, and the percentage from the plan when a plan item is being built, otherwise the model's estimate (marked `~`). On by default; `/status off\|on` |
 | **playtest** | You are the test. With `/playtest on` (or `/once playtest <prompt>`) the gates, specs and their tools step aside; the model builds, then `hand_over` tells you what it did, how to try it and what to watch. **Good** = completed (plan item ticked as tested by user); **Not right** + your note = the next task, then it hands over again. For looks and feel it asks you instead of tuning alone through rounds of screenshots. Test runs through the shell (`npm test`, `npx playwright`…) are blocked too, unless you ask for tests. Helpers (anti-loop, vision relay, research, status line) stay on. Starting autopilot turns it off. `/playtest on\|off` |
+| **notify** | A desktop notification when Pi needs you: a run of 30 s or more has ended ("Done: …", "Has a question: …", "Stopped with an error: …"), or a dialog has waited 15 s ("Waiting for you: Ready to test"). A run that ends in a dialog sends one notification naming it; Esc-aborted runs stay quiet. Windows: a toast in any terminal (allow Windows PowerShell under Settings → System → Notifications); elsewhere OSC 777 / Kitty OSC 99. `/notify on\|off\|test` |
+| **live-models** | Live model lists for your own OpenAI-compatible servers (vLLM, llama.cpp, LM Studio, a gateway). Add `"liveModels": true` to a provider in `~/.pi/agent/models.json` and Pi lists what the server's `/models` reports at startup and whenever you open `/model`, so a newly loaded model needs no editing. Each served model takes thinking levels, sampling and the output limit from the closest listed model by name; the server's context window and image support win. If the model in use is no longer served and the server has exactly one, Pi switches to it. Offline, the last list seen is shown. Setup: [Point Pi at your model server](#point-pi-at-your-model-server). `/live-models` |
 | **once** | One-shot modifiers for a single prompt: `/once <modifier> [<modifier> ...] <prompt>`. Polish registers its levels, expand its axes; other extensions can register more via `extensions/shared/once.ts`. `/once` alone lists what is available. |
 | **vision-relay** | Lets text-only session models "see". When the session model has no image input, screenshots and pasted images go to a separate vision model and the session gets its description instead. Models declaring `input: ["text", "image"]` still get images attached directly. An **image budget** (`maxImageBytesPerRequest`, default 32 MiB) keeps only the newest screenshots in each request, so a long session never grows past the server's request size limit; the session keeps them all. `/vision status`, `/vision model <provider/id>`, `/vision off` |
 
@@ -79,7 +81,7 @@ The script:
 1. `git pull`s the clone
 2. Installs the `pi` CLI globally if missing
 3. Installs Playwright + browsers globally (needed for web acceptance scenarios)
-4. Creates `~/.pi/agent/models.json` from `bootstrap/models.json` **only if you don't have one** — then **edit `baseUrl` and the model ids to match your server**
+4. Creates `~/.pi/agent/models.json` from `bootstrap/models.json` **only if you don't have one**. Then **set `baseUrl` to your server**; the model list comes from the server (see [Point Pi at your model server](#point-pi-at-your-model-server))
 5. Registers this repo as a Pi package (from your clone's git `origin`, falling back to the local path)
 6. Runs `pi update --extensions`
 
@@ -95,13 +97,47 @@ git clone https://github.com/Daeliel/pi-client.git
 pi install /path/to/pi-client   # or the git URL
 
 # point Pi at your inference server:
-#   copy bootstrap/models.json to ~/.pi/agent/models.json and edit baseUrl/model ids
+#   copy bootstrap/models.json to ~/.pi/agent/models.json and set baseUrl
+#   ("liveModels": true lists what the server serves; see "Point Pi at your model server")
 pi update --extensions
 ```
 
 ### Optional: web research key
 
 Free Brave Search key: <https://api-dashboard.search.brave.com/register>, then in Pi: `/research key YOUR_KEY` (saved to `~/.pi/research.config.json`, never committed).
+
+### Point Pi at your model server
+
+Pi reads its providers from `~/.pi/agent/models.json` (the installer creates it from [`bootstrap/models.json`](bootstrap/models.json) if you have none). For a server of your own, usually only `baseUrl` needs changing:
+
+```json
+{
+  "providers": {
+    "local-gpu": {
+      "baseUrl": "http://localhost:8080/v1",
+      "api": "openai-completions",
+      "apiKey": "local",
+      "liveModels": true,
+      "models": [
+        { "id": "qwen3.6-27b-q6-dflash", "name": "Qwen 3.6 27B", "reasoning": true, "input": ["text", "image"],
+          "contextWindow": 131072, "maxTokens": 32768, "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 } }
+      ]
+    }
+  }
+}
+```
+
+**`"liveModels": true`** (pi-client's live-models extension): Pi lists the models the server reports at `<baseUrl>/models`, so a model you load or swap on the server appears in `/model` without editing this file. It works with any OpenAI-compatible server: llama.cpp's `llama-server`, LM Studio, Ollama, vLLM, or a gateway in front of them.
+
+- **When:** at startup (Pi waits up to 2.5 s for the server) and each time you open `/model`. `/live-models` checks on demand.
+- **The `models` you list are templates.** A served model takes `reasoning`, `thinkingLevelMap`, `samplingParams`, `compat` and `maxTokens` from the listed model whose id it shares the most parts with (`qwen3.6-27b-q4` takes the settings of `qwen3.6-27b-q6-dflash`). A served model with no similar listed model gets plain defaults (no reasoning, text only), so list one entry per model family you use.
+- **The server's facts win.** If `/models` reports a context length (`context_window`, `context_length` or vLLM's `max_model_len`) or image support (`capabilities` with `vision`/`image`), those are used. Otherwise the template's values apply, or 131072 tokens.
+- **Your model changed on the server:** when the model in use, or your default model, is no longer served and the server serves exactly one model, Pi switches to it and tells you. When it serves several, Pi says which; pick one in `/model` (Ctrl+S makes it the default). A model you chose on another provider is left alone.
+- **Server off:** the last list seen is shown (kept in `~/.pi/live-models.cache.json`). If the model in use, or your default, is on that server, Pi says it could not reach it.
+- **Keys:** `apiKey` takes a literal, an environment variable (`"${MY_SERVER_KEY}"`, so the key stays out of the file), or `"!command"`.
+- **Off:** remove `"liveModels"` (or set it to `false`); Pi then shows exactly the models you list.
+
+Several servers can each have their own provider entry; mark the ones whose models change.
 
 ## Configuration
 

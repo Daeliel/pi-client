@@ -36,7 +36,9 @@
       "./extensions/autopilot",
       "./extensions/once",
       "./extensions/vision-relay",
-      "./extensions/playtest"
+      "./extensions/playtest",
+      "./extensions/notify",
+      "./extensions/live-models"
     ],
     "skills": [
       "./skills"

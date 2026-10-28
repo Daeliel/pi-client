@@ -299,7 +299,26 @@ function Show-PiClientInstallSummary {
     Write-Host ""
     Write-Host "Restart Pi if it was already running." -ForegroundColor Cyan
     Write-Host "Point ~/.pi/agent/models.json baseUrl at your OpenAI-compatible server (llama.cpp, LM Studio, Ollama, vLLM...)." -ForegroundColor Yellow
+    Show-LiveModelsHint
     return $installedSource
+}
+
+# An existing models.json is never replaced, so it may predate liveModels: say how to turn it on.
+function Show-LiveModelsHint {
+    $modelsDest = Join-Path (Get-PiAgentDir) "models.json"
+    if (-not (Test-Path $modelsDest)) { return }
+    try {
+        $providers = (Get-Content $modelsDest -Raw | ConvertFrom-Json).providers
+    } catch {
+        return
+    }
+    $live = @($providers.PSObject.Properties | Where-Object { $_.Value.liveModels -eq $true } | ForEach-Object { $_.Name })
+    if ($live.Count -gt 0) {
+        Write-Host "Live model lists: $($live -join ', ') - Pi lists what the server serves (/live-models)." -ForegroundColor Gray
+        return
+    }
+    Write-Host "Tip: add `"liveModels`": true to your server's provider in ~/.pi/agent/models.json and Pi lists" -ForegroundColor Gray
+    Write-Host "  whatever the server serves - no model ids to edit. README: 'Point Pi at your model server'." -ForegroundColor Gray
 }
 
 function Get-PiResearchConfigPath {
@@ -368,7 +387,7 @@ function Install-PiClientBootstrapModels {
         Write-Host "Keeping existing ~/.pi/agent/models.json (template: bootstrap/models.json)." -ForegroundColor Gray
     } else {
         Copy-Item $modelsSrc $modelsDest -Force
-        Write-Host "Created ~/.pi/agent/models.json from bootstrap template - edit baseUrl/model ids for your server." -ForegroundColor Yellow
+        Write-Host "Created ~/.pi/agent/models.json from bootstrap template - set baseUrl to your server (its models are listed live)." -ForegroundColor Yellow
     }
 
     $settings = Read-PiSettings
