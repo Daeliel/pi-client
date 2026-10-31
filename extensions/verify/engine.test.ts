@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { execFileSync } from "node:child_process";
+import { localPython } from "../shared/python";
 import { DEFAULT_CONFIG } from "./config";
 import { allSkippedForMissingTools, isPlaceholderTestScript, loadDependent, partitionScopes, playwrightFailures, verify } from "./engine";
 import { classifyVerifyFailure } from "../shared/failure-classify";
@@ -94,6 +96,37 @@ describe("verify scopes", () => {
     const dir = tree({ "package.json": "{}", "src/main.ts": "", "src/ui/hud.ts": "" });
     try {
       assert.deepEqual(summary(dir, ["src/main.ts", "src/ui/hud.ts"]), ["(root): src/main.ts,src/ui/hud.ts"]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a folder the project's git ignores is checked on its own: ComfyUI's tests are not run for a custom node", () => {
+    const dir = tree({
+      "ComfyUI/pyproject.toml": "",
+      "ComfyUI/.gitignore": "/custom_nodes/\n",
+      "ComfyUI/custom_nodes/video_factory/__init__.py": "",
+      "ComfyUI/custom_nodes/video_factory/nodes/poster.py": "",
+      "ComfyUI/custom_nodes/loose_node.py": "",
+      "ComfyUI/comfy/model.py": "",
+      "python_embeded/python.exe": "",
+    });
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: path.join(dir, "ComfyUI") });
+      assert.deepEqual(summary(dir, ["ComfyUI/custom_nodes/video_factory/nodes/poster.py"]), ["ComfyUI/custom_nodes/video_factory/: nodes/poster.py"]);
+      assert.deepEqual(summary(dir, ["ComfyUI/custom_nodes/loose_node.py"]), ["ComfyUI/custom_nodes/: loose_node.py"]);
+      assert.deepEqual(summary(dir, ["ComfyUI/comfy/model.py"]), ["ComfyUI/: comfy/model.py"], "ComfyUI's own code is still ComfyUI's");
+      // The portable build's interpreter, not PATH Python, runs the checks.
+      assert.equal(localPython(path.join(dir, "ComfyUI/custom_nodes/video_factory")), `"${path.join(dir, "python_embeded/python.exe").replace(/\\/g, "/")}"`);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a repository inside a project is its own project", () => {
+    const dir = tree({ "pyproject.toml": "", "vendor/lib/.git/HEAD": "", "vendor/lib/core/x.py": "" });
+    try {
+      assert.deepEqual(summary(dir, ["vendor/lib/core/x.py"]), ["vendor/lib/: core/x.py"]);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

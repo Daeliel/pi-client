@@ -8,7 +8,7 @@ export const OPERATING_PROCEDURE = `## Operating procedure (foundation verifier)
 Edits are checked by a verifier (lint + tests). You cannot finish while checks fail:
 
 1. Trust the verifier's actual run — not reasoning. **[SKIP] is not a pass** — run /doctor.
-2. If verification fails, fix the real cause. Do not disable, weaken, or delete checks.
+2. If verification fails, fix the real cause. Do not disable, weaken, or delete checks. Failures listed as ALREADY FAILING BEFORE THIS CHANGE are not yours: leave that code alone, mention them to the user, and fix them only if asked.
 3. Audit the WHOLE file you touch, not only the symptom lines.
 4. Before multi-file work, state shared interfaces first; make every call site match.
 5. Prove behaviour with a test that exercises the change.

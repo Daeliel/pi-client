@@ -4,6 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { VerifyConfig, LanguageConfig } from "./config";
 import { runCommand } from "../shared/run-command";
+import { localPython } from "../shared/python";
+import type { BeforeWorld } from "./before";
+import { describeFailure, parseFailures } from "./failures";
+import { spawnSync } from "node:child_process";
 
 
 export type CheckKind = "lint" | "build" | "test";
@@ -15,6 +19,8 @@ export interface CheckResult {
   status: "pass" | "fail" | "skip";
   output: string;
   reason?: string;
+  /** Failures that were there before the change too (not the model's). */
+  preexisting?: string[];
 }
 
 export interface VerifyResult {
@@ -90,9 +96,14 @@ export async function hasTool(probe: string, cwd: string): Promise<boolean> {
   return ok;
 }
 
-/** Detect the Python interpreter once (fixes the python/py PATH fragility). */
-let cachedPython: string | null | undefined;
+/** The project's own interpreter (venv, python_embeded) when it has one, else PATH Python. */
 export async function pythonCmd(cwd: string): Promise<string | null> {
+  return localPython(cwd) ?? (await pathPython(cwd));
+}
+
+/** Detect the PATH interpreter once (fixes the python/py PATH fragility). */
+let cachedPython: string | null | undefined;
+async function pathPython(cwd: string): Promise<string | null> {
   if (cachedPython !== undefined) return cachedPython;
   for (const candidate of ["python", "python3", "py"]) {
     if (await hasTool(`${candidate} --version`, cwd)) {
@@ -146,13 +157,46 @@ function isProjectDir(dir: string): boolean {
   }
 }
 
-/** Walk up from `dir` to `root`; the first project folder wins, else the root itself. */
+/**
+ * Walk up from `dir` to `root`; the first project folder (or repository) wins, else the root
+ * itself — unless that project's git ignores the folder the change is in.
+ */
 function nearestProjectDir(dir: string, root: string): string {
   for (let d = dir; ; d = path.dirname(d)) {
     const rel = path.relative(root, d);
     if (rel.startsWith("..") || path.isAbsolute(rel)) return root;
-    if (rel === "" || isProjectDir(d)) return d;
+    if (rel === "" || isProjectDir(d) || fileExists(d, ".git")) return d === dir ? d : ownedPart(d, dir);
   }
+}
+
+/**
+ * A folder the project's git ignores (ComfyUI's custom_nodes/, a vendored copy) is not the
+ * project's code, and the project's tests say nothing about it. The change is then checked
+ * in the folder just inside the outermost ignored one: custom_nodes/video_factory, not ComfyUI.
+ */
+const ownedCache = new Map<string, string>();
+function ownedPart(project: string, dir: string): string {
+  const key = `${project}|${dir}`;
+  let owned = ownedCache.get(key);
+  if (owned === undefined) {
+    owned = findOwnedPart(project, dir);
+    ownedCache.set(key, owned);
+  }
+  return owned;
+}
+
+function findOwnedPart(project: string, dir: string): string {
+  const between: string[] = []; // `dir` up to, not including, `project`
+  for (let d = dir; d !== project; d = path.dirname(d)) between.push(d);
+  const rels = between.map((d) => path.relative(project, d).split(path.sep).join("/"));
+  // Exit 0: some ignored; 1: none; 128: not a repository, or no git.
+  const r = spawnSync("git", ["check-ignore", ...rels], { cwd: project, encoding: "utf8", windowsHide: true, timeout: 10000 });
+  if (r.status !== 0) return project;
+  const ignored = new Set(r.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean));
+  for (let i = between.length - 1; i >= 0; i--) {
+    if (ignored.has(rels[i]!)) return i === 0 ? between[0]! : between[i - 1]!;
+  }
+  return project;
 }
 
 interface WorkScope {
@@ -279,6 +323,11 @@ const BASE_EXT_TO_LANG: Record<string, string> = {
   ".cjs": "node",
 };
 
+/** True for a file some enabled check covers (by extension) — the files a change is made of. */
+export function isCheckedFile(config: VerifyConfig, file: string): boolean {
+  return extMapFor(config)[path.extname(file).toLowerCase()] !== undefined;
+}
+
 /** Build the extension→language map, layering any user-declared extensions on top. */
 function extMapFor(config: VerifyConfig): Record<string, string> {
   const map: Record<string, string> = { ...BASE_EXT_TO_LANG };
@@ -338,8 +387,14 @@ async function prepare(
   const withFiles = (command: string) => command.replace(/\{files\}/g, filesArg(files));
 
   if (language === "python") {
-    const py = await pythonCmd(cwd);
+    let py = await pythonCmd(cwd);
     if (!py) return { command: raw, probe: "python --version" }; // will skip via probe
+    // Ruff reads files, it does not import them: a project interpreter without it (a portable
+    // build's python_embeded) borrows PATH Python's.
+    if (kind === "lint" && raw.includes("{py} -m ruff") && !(await hasTool(`${py} -m ruff --version`, cwd))) {
+      const fallback = await pathPython(cwd);
+      if (fallback && (await hasTool(`${fallback} -m ruff --version`, cwd))) py = fallback;
+    }
     let command = withFiles(raw.replace(/\{py\}/g, py));
     if (kind === "test" && command.includes("pytest")) {
       const pyFiles = files.filter((f) => f.toLowerCase().endsWith(".py"));
@@ -358,11 +413,15 @@ async function prepare(
         command = `${py} -m pytest -q .`;
       }
     }
+    // pytest needs the project's interpreter (it imports the code); one without pytest is a
+    // missing tool to install, not a failing test.
     const probe = command.includes(`${py} -m ruff`)
       ? `${py} -m ruff --version`
       : command.startsWith("ruff")
         ? "ruff --version"
-        : `${py} --version`;
+        : command.includes(`${py} -m pytest`)
+          ? `${py} -m pytest --version`
+          : `${py} --version`;
     return { command, probe };
   }
 
@@ -409,6 +468,7 @@ async function runCheck(
   files: string[],
   signal?: AbortSignal,
   rerunFlakes = false,
+  before?: BeforeWorld | null,
 ): Promise<CheckResult | null> {
   const prepared = await prepare(language, kind, cfg, cwd, files);
   if (!prepared) return null;
@@ -455,6 +515,21 @@ async function runCheck(
   }
   // A failure says what ran where: a wrong folder or path is then visible, not guessed at.
   if (r.code !== 0) output = `$ ${prepared.command}   (in ${cwd})\n${output}`;
+
+  if (r.code !== 0 && before?.trusted) {
+    const split = await splitByCause(r.out, language, kind, cfg, cwd, timeoutMs, files, before, signal);
+    if (signal?.aborted) return null;
+    if (split && split.old.length > 0) {
+      const old = split.old.map(describeFailure);
+      if (split.fresh.length === 0) {
+        return { language, kind, label, status: "pass", output, reason: `${old.length} already failing before this change — not blocking`, preexisting: old };
+      }
+      output =
+        `CAUSED BY THIS CHANGE — fix these:\n${split.fresh.map((s) => `  ${describeFailure(s)}`).join("\n")}\n` +
+        `ALREADY FAILING BEFORE THIS CHANGE — not yours, leave them alone:\n${old.map((s) => `  ${s}`).join("\n")}\n\n${output}`;
+      return { language, kind, label, status: "fail", output, preexisting: old };
+    }
+  }
   return {
     language,
     kind,
@@ -462,6 +537,48 @@ async function runCheck(
     status: r.code === 0 ? "pass" : "fail",
     output,
   };
+}
+
+/**
+ * Run the check again with the change taken out, and sort its failures: `fresh` ones appear
+ * only with the change, `old` ones either way. Null when the outputs cannot be compared.
+ */
+async function splitByCause(
+  out: string,
+  language: string,
+  kind: CheckKind,
+  cfg: LanguageConfig,
+  cwd: string,
+  timeoutMs: number,
+  files: string[],
+  before: BeforeWorld,
+  signal?: AbortSignal,
+): Promise<{ fresh: string[]; old: string[] } | null> {
+  const after = parseFailures(out);
+  if (!after) return null;
+  // A command given the changed files (lint) gets, before the change, only those that existed.
+  const takesFiles = rawCommand(cfg, kind)?.includes("{files}") ?? false;
+  const existed = takesFiles ? files.filter((f) => before.existedBefore(path.resolve(cwd, f))) : files;
+  let failedBefore: Set<string> | null;
+  if (takesFiles && files.length > 0 && existed.length === 0) {
+    failedBefore = new Set(); // every file is new: nothing failed before
+  } else {
+    const prepared = await prepare(language, kind, cfg, cwd, existed);
+    if (!prepared) return null;
+    const key = `${cwd}\n${prepared.command}`;
+    if (before.cache.has(key)) {
+      failedBefore = before.cache.get(key)!;
+    } else {
+      const r = await before.run(() => run(prepared.command, cwd, timeoutMs, signal));
+      if (r.aborted) return null;
+      failedBefore = r.timedOut ? null : r.code === 0 ? new Set() : parseFailures(r.out);
+      before.cache.set(key, failedBefore);
+    }
+  }
+  if (!failedBefore) return null;
+  const fresh = [...after].filter((s) => !failedBefore!.has(s));
+  const old = [...after].filter((s) => failedBefore!.has(s));
+  return { fresh, old };
 }
 
 /**
@@ -476,6 +593,8 @@ export async function verify(
   signal?: AbortSignal,
   /** Called before each check runs, e.g. "python test" (with subproject prefix when isolated). */
   onCheck?: (label: string) => void,
+  /** The project before the change: failures that were already there do not fail the check. */
+  before?: BeforeWorld | null,
 ): Promise<VerifyResult> {
   if (changedFiles.length === 0 && config.isolateSubprojects && isMultiProjectWorkspace(cwd)) {
     return {
@@ -516,7 +635,7 @@ export async function verify(
       const langFiles = scopeFiles.length ? filesForLang(scopeFiles, lang, extMap) : [];
       for (const kind of only) {
         onCheck?.(`${scope.label ? `${scope.label} ` : ""}${lang} ${kind}`);
-        const result = await runCheck(lang, kind, cfg, scope.cwd, config.timeoutMs, langFiles, signal, config.rerunFlakes !== false);
+        const result = await runCheck(lang, kind, cfg, scope.cwd, config.timeoutMs, langFiles, signal, config.rerunFlakes !== false, before);
         if (!result) continue;
         if (scope.label) {
           result.label = `${scope.label} ${result.label}`;

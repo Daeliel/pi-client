@@ -18,6 +18,7 @@ import { collectPreflightWarnings } from "./preflight";
 import { hasBlockingSpecWarnings, scanSpecFileContent, formatSpecPatternWarnings } from "./spec-audit";
 import { detectStacks } from "../shared/stack-detect";
 import { runCommand } from "../shared/run-command";
+import { localPython } from "../shared/python";
 
 const pexec = promisify(exec);
 
@@ -45,8 +46,13 @@ async function hasTool(probe: string, cwd: string): Promise<boolean> {
   return ok;
 }
 
-let cachedPython: string | null | undefined;
+/** The project's own interpreter (venv, python_embeded) when it has one, else PATH Python. */
 async function pythonCmd(cwd: string): Promise<string | null> {
+  return localPython(cwd) ?? (await pathPython(cwd));
+}
+
+let cachedPython: string | null | undefined;
+async function pathPython(cwd: string): Promise<string | null> {
   if (cachedPython !== undefined) return cachedPython;
   for (const candidate of ["python", "python3", "py"]) {
     if (await hasTool(`${candidate} --version`, cwd)) {

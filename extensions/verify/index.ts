@@ -1,7 +1,9 @@
+import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { loadConfig, type VerifyConfig } from "./config";
-import { allSkippedForMissingTools, verify, formatReport, toolchainStatus } from "./engine";
+import { allSkippedForMissingTools, isCheckedFile, verify, formatReport, toolchainStatus, type VerifyResult } from "./engine";
+import { BeforeStore } from "./before";
 import { OPERATING_PROCEDURE } from "./procedure";
 import { resetGateClaim, tryClaimGate, registerGateReset } from "../shared/gate-orchestrator";
 import { extractEditPath, isEditTool } from "../shared/edit-tools";
@@ -35,6 +37,35 @@ export default function (pi: ExtensionAPI) {
     return configCache;
   }
 
+  // The project before the model's change, to tell its failures from ones already there.
+  let beforeStore: BeforeStore | null = null;
+  function before(ctx: ExtensionContext): BeforeStore {
+    if (!beforeStore) beforeStore = new BeforeStore(ctx.cwd);
+    return beforeStore;
+  }
+  function beforeWorld(ctx: ExtensionContext) {
+    const config = cfg(ctx);
+    return before(ctx).world((abs) => isCheckedFile(config, abs));
+  }
+  /** Stop tracking the current change: its checks are settled. */
+  function settle(ctx: ExtensionContext) {
+    changedFiles.clear();
+    fixAttempts = 0;
+    repeats.reset();
+    persist();
+    before(ctx).clear();
+  }
+  /** Tell the user, once, what was already failing — it no longer blocks, but they should know. */
+  function reportPreexisting(ctx: ExtensionContext, result: VerifyResult) {
+    const old = result.checks.flatMap((c) => (c.status === "pass" && c.preexisting ? c.preexisting : []));
+    if (old.length === 0 || !ctx.hasUI) return;
+    const shown = old.slice(0, 5).join(", ");
+    ctx.ui.notify(
+      `Verify: ${old.length} failure${old.length === 1 ? " was" : "s were"} already there before this change — not blocking: ${shown}${old.length > 5 ? ", …" : ""}. /verify project shows everything.`,
+      "info",
+    );
+  }
+
   // Persist in-flight state to the session (a custom entry — NOT sent to the LLM)
   // so /resume and reload keep guarding edits that never reached their gate.
   function persist() {
@@ -50,6 +81,7 @@ export default function (pi: ExtensionAPI) {
     fixAttempts = 0;
     repeats.reset();
     persist();
+    beforeStore?.clear();
     return what;
   });
 
@@ -65,6 +97,10 @@ export default function (pi: ExtensionAPI) {
         for (const f of data?.changedFiles ?? []) changedFiles.add(f);
         fixAttempts = data?.fixAttempts ?? 0;
       }
+    }
+    beforeStore = null; // a new session may be in another folder
+    if (before(ctx).recover() && ctx.hasUI) {
+      ctx.ui.notify("Verify: Pi stopped while checking the project without the last change — the changed files are back as the model left them.", "warning");
     }
 
     if (!ctx.hasUI) return;
@@ -90,11 +126,21 @@ export default function (pi: ExtensionAPI) {
     if (!cfg(ctx).blocking) {
       changedFiles.clear();
       persist();
+      before(ctx).clear();
     }
+    if (changedFiles.size === 0) before(ctx).clear(); // nothing pending: a new change starts here
+    before(ctx).start();
     if (playtestOn()) return; // playtest mode: the user is the check
     return {
       systemPrompt: `${event.systemPrompt}\n\n${OPERATING_PROCEDURE}`,
     };
+  });
+
+  // Keep each file as it was before its first edit (the edit has not run yet).
+  pi.on("tool_call", async (event, ctx) => {
+    if (playtestOn() || !isEditTool(event.toolName)) return;
+    const p = extractEditPath("input" in event ? event.input : undefined);
+    if (p) before(ctx).capture(p);
   });
 
   // 2) Auto-verify (lint only) after each edit, returned inline as the edit's result.
@@ -111,7 +157,7 @@ export default function (pi: ExtensionAPI) {
     const config = cfg(ctx);
     if (!config.verifyOnEdit || !p) return;
 
-    const result = await verify(ctx.cwd, [p], config, ["lint"], ctx.signal);
+    const result = await verify(ctx.cwd, [p], config, ["lint"], ctx.signal, undefined, beforeWorld(ctx));
     if (!result.failed) return;
 
     // Not isError: the edit DID apply. Flagging the edit as failed makes small models
@@ -130,22 +176,31 @@ export default function (pi: ExtensionAPI) {
     if (playtestOn()) return; // playtest mode: the user is the check
     configCache = null; // a config written during the run counts now, not at the next prompt
     const config = cfg(ctx);
-    if (!config.blocking || changedFiles.size === 0) return;
+    if (!config.blocking) return;
+    // Files changed without an edit tool (bash, a script) are part of the change too.
+    const world = beforeWorld(ctx);
+    const tracked = new Set([...changedFiles].map((f) => path.resolve(ctx.cwd, f).toLowerCase()));
+    for (const f of world?.foundChanged ?? []) if (!tracked.has(f.toLowerCase())) changedFiles.add(f);
+    if (changedFiles.size === 0) return;
 
     await withGateWorkingMessage(ctx, "Verifying (lint/tests) — inference idle · /skip to move on", async (status) => {
       const mark = skipMark();
-      const result = await verify(ctx.cwd, [...changedFiles], config, undefined, skipAwareSignal("verify", ctx.signal), (label) =>
-        status.step(label),
+      const result = await verify(
+        ctx.cwd,
+        [...changedFiles],
+        config,
+        undefined,
+        skipAwareSignal("verify", ctx.signal),
+        (label) => status.step(label),
+        world,
       );
       if (skippedSince(mark, "verify")) return; // the user moved on: /skip already cleared the state
       if (ctx.signal?.aborted) return; // user cancelled the turn — leave state intact
 
       if (!result.failed) {
         // Checks pass → these files are confirmed; stop tracking them.
-        changedFiles.clear();
-        fixAttempts = 0;
-        repeats.reset();
-        persist();
+        reportPreexisting(ctx, result);
+        settle(ctx);
         // Plan items proven by the suite, that the model said it was building, are done.
         const changed = markFromVerifyPass(ctx.cwd);
         if (changed.length && ctx.hasUI) ctx.ui.notify(`Plan: ${changed.join(", ")}.`, "info");
@@ -166,10 +221,7 @@ export default function (pi: ExtensionAPI) {
           { deliverAs: "nextTurn" },
         );
         // Give up cleanly so the failure doesn't re-fire on every later turn.
-        changedFiles.clear();
-        fixAttempts = 0;
-        repeats.reset();
-        persist();
+        settle(ctx);
         return;
       }
 
@@ -210,7 +262,8 @@ export default function (pi: ExtensionAPI) {
       configCache = null; // re-read: the model may have just written verify.config.json
       const config = cfg(ctx);
       const files = params.scope === "project" ? [] : [...changedFiles];
-      const result = await verify(ctx.cwd, files, config, undefined, signal);
+      // "project" is the whole truth, old failures included; "changed" judges the change.
+      const result = await verify(ctx.cwd, files, config, undefined, signal, undefined, params.scope === "project" ? null : beforeWorld(ctx));
       const report = formatReport(result);
       const allSkipped = files.length > 0 && allSkippedForMissingTools(result);
       return {
@@ -227,7 +280,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const config = cfg(ctx);
       const files = args.trim() === "project" ? [] : [...changedFiles];
-      const result = await verify(ctx.cwd, files, config);
+      const result = await verify(ctx.cwd, files, config, undefined, undefined, undefined, args.trim() === "project" ? null : beforeWorld(ctx));
       const report = formatReport(result);
       if (result.failed) {
         ctx.ui.notify("Verification failed — sending failures to the agent to fix.", "error");
