@@ -154,6 +154,54 @@ describe("anti-loop", () => {
     }
   });
 
+  it("a reply that runs away is not told to continue, and the model no longer sees the repeated part", async () => {
+    const h = await createHarness({ extensions: [antiLoopExt] });
+    try {
+      const runaway = "<think>The journey failed at the relic pickup. Is the walk helper overshooting? " + "✗ ".repeat(6000);
+      let seen = "";
+      h.faux.setResponses([
+        fauxAssistantMessage(runaway, { stopReason: "length" }),
+        (context) => {
+          seen = JSON.stringify(context.messages ?? []);
+          return reply("Reverting the time scale.");
+        },
+        reply("unused"),
+      ]);
+      await h.session.prompt("fix the journey");
+      await h.settle();
+      assert.match(seen, /Your last reply ran away/);
+      assert.doesNotMatch(seen, /Continue from where you stopped/);
+      assert.match(seen, /relic pickup/, "what it reasoned before the run stays");
+      assert.match(seen, /characters of repeated output removed/);
+      assert.ok(!seen.includes("✗ ".repeat(500)), "the run itself is gone");
+    } finally {
+      h.dispose();
+    }
+  });
+
+  it("an earlier runaway in the session is cleaned before every request", async () => {
+    const h = await createHarness({ extensions: [antiLoopExt] });
+    try {
+      let seen = "";
+      h.faux.setResponses([
+        reply("Checking the minimap. " + "Hmm — the plan view or the iso view? ".repeat(400)),
+        (context) => {
+          seen = JSON.stringify(context.messages ?? []);
+          return reply("ok");
+        },
+        reply("unused"),
+      ]);
+      await h.session.prompt("check M-02");
+      await h.settle();
+      await h.session.prompt("go on");
+      assert.match(seen, /Checking the minimap/);
+      const asked = seen.split("the plan view or the iso view?").length - 1;
+      assert.ok(asked >= 1 && asked <= 6, `the repeated question is cut (${asked} left of 400)`);
+    } finally {
+      h.dispose();
+    }
+  });
+
   it("does not hard-stop when each recovery is followed by real progress", async () => {
     const h = await createHarness({ extensions: [antiLoopExt] });
     try {

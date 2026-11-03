@@ -18,6 +18,12 @@ export interface AntiLoopConfig {
   detectThinkingLoops: boolean;
   /** Same normalized thinking line must appear this many times to count as a loop. */
   thinkingLoopMinRepeats: number;
+  /**
+   * Stop a reply that runs away — the same symbol, phrase or passage over and over — and
+   * remove the repeated part from what the model sees next. Judged by the output's shape,
+   * so it holds for any model and any thinking-tag style.
+   */
+  detectRunaway: boolean;
   /** Recover when the model dumps Hermes/Qwen XML tools into thinking without a native toolCall. */
   recoverGhostToolCalls: boolean;
   /** User-help mode: /stuck, interrupt, last recovery, hard-stop handoff. */
@@ -39,6 +45,7 @@ export const DEFAULT_CONFIG: AntiLoopConfig = {
   detectStuckPhrases: true,
   detectThinkingLoops: true,
   thinkingLoopMinRepeats: 3,
+  detectRunaway: true,
   recoverGhostToolCalls: true,
   userHelp: true,
   churnNotifyAfterFruitless: 5,

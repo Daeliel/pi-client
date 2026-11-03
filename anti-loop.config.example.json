@@ -7,6 +7,7 @@
   "detectStuckPhrases": true,
   "detectThinkingLoops": true,
   "thinkingLoopMinRepeats": 3,
+  "detectRunaway": true,
   "recoverGhostToolCalls": true,
   "userHelp": true,
   "churnNotifyAfterFruitless": 5,

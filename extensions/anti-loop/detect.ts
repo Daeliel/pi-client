@@ -243,6 +243,10 @@ Continue from where you stopped:
 - Do not restate the whole investigation
 - Do not dump long reasoning`;
 
+export const RUNAWAY_STEER = `ANTI-LOOP: Your last reply ran away — it kept repeating the same thing instead of moving on, so it was stopped and the repeated part was removed.
+
+Do not continue it and do not repeat it. Take ONE concrete next step — a tool call, or a short answer to the user — written in plain sentences.`;
+
 export const STUCK_STEER = `ANTI-LOOP: You are repeating the same stuck-loop reasoning. Stop replaying that monologue.
 
 Do ONE concrete action you have not done yet (edit code, restart server, or run a different test). If you cannot, tell the user what is blocking you in 2 sentences.`;

@@ -1,10 +1,10 @@
 /** Tools that count as progress (not approach-churn). */
 export { isEditTool } from "../shared/edit-tools";
 
-export type RecoveryKind = "repeat" | "thinking" | "stuck" | "truncation" | "ghost";
+export type RecoveryKind = "repeat" | "thinking" | "stuck" | "truncation" | "ghost" | "runaway";
 
 /**
- * Last allowed recovery for approach-thrash (not truncation / ghost XML)
+ * Last allowed recovery for approach-thrash (not truncation / ghost XML / runaway output)
  * becomes user-help instead of "try one more different action".
  */
 export function lastRecoveryUsesUserHelp(
@@ -13,7 +13,7 @@ export function lastRecoveryUsesUserHelp(
   maxRecoveries: number,
 ): boolean {
   if (!kind) return false;
-  if (kind === "truncation" || kind === "ghost") return false;
+  if (kind === "truncation" || kind === "ghost" || kind === "runaway") return false;
   return recoveriesAfterThis >= maxRecoveries;
 }
 

@@ -11,6 +11,7 @@ import {
   isOutputTruncated,
   isThinkingLoop,
   REPEAT_STEER,
+  RUNAWAY_STEER,
   STUCK_STEER,
   stuckPhraseRepeatCount,
   THINKING_LOOP_STEER,
@@ -19,6 +20,7 @@ import {
   TRUNCATION_STEER,
 } from "./detect";
 import { ANTI_LOOP_PROCEDURE } from "./procedure";
+import { CHECK_EVERY, cutRunaway, runawayKind } from "./runaway";
 import {
   isEditTool,
   lastRecoveryUsesUserHelp,
@@ -47,6 +49,11 @@ export default function (pi: ExtensionAPI) {
   let hardStopped = false;
   let steeredThisTurn = false;
   let thinkingLoopFired = false;
+  /** Characters of the streaming reply already checked for a runaway. */
+  let runawayCheckedAt = 0;
+  /** Replies already cleaned for the context, by their text (null: nothing ran away). */
+  const cleaned = new Map<string, string | null>();
+  let cleanedNotified = false;
   /** Bumped on hard stop so deferred followUps from earlier recoveries are dropped. */
   let recoveryEpoch = 0;
 
@@ -80,6 +87,7 @@ export default function (pi: ExtensionAPI) {
     recoveries = 0;
     steeredThisTurn = false;
     thinkingLoopFired = false;
+    runawayCheckedAt = 0;
     uniqueFingerprints.clear();
     fruitlessCalls = 0;
     editCount = 0;
@@ -325,6 +333,72 @@ export default function (pi: ExtensionAPI) {
     return tryRecover(ctx, config, THINKING_LOOP_STEER, "thinking", true);
   }
 
+  /** Stop a runaway reply now; the steer goes out once the aborted run has settled. */
+  function recoverRunaway(ctx: ExtensionContext, config: AntiLoopConfig): boolean {
+    if (hardStopped || thinkingLoopFired) return false;
+    thinkingLoopFired = true;
+    if (ctx.hasUI) {
+      ctx.ui.notify("Anti-loop: the reply is repeating itself — stopping it.", "warning");
+      ctx.ui.setWorkingMessage("Anti-loop: stopping a runaway reply…");
+    }
+    ctx.abort();
+    return tryRecover(ctx, config, RUNAWAY_STEER, "runaway", true);
+  }
+
+  /** What the model wrote, thinking and text alike — whatever tags it uses. */
+  function replyOf(message: unknown): string {
+    return [extractAssistantThinking(message), extractAssistantText(message)].filter(Boolean).join("\n");
+  }
+
+  /** `text` without its runaway part, remembered so history is not re-checked every request. */
+  function cleanedText(text: string): string | null {
+    if (text.length < 800) return null;
+    if (!cleaned.has(text)) {
+      if (cleaned.size > 2000) cleaned.clear();
+      cleaned.set(text, cutRunaway(text));
+    }
+    return cleaned.get(text) ?? null;
+  }
+
+  // A runaway reply left in the conversation is copied by the model on the next turn:
+  // what it sees has the repeated part cut (the session file keeps it as it was).
+  pi.on("context", async (event, ctx) => {
+    const config = cfg(ctx);
+    if (!config.enabled || !config.detectRunaway) return;
+    let changed = 0;
+    const messages = event.messages.map((msg) => {
+      const m = msg as { role?: string; content?: unknown };
+      if (m.role !== "assistant" || !Array.isArray(m.content)) return msg;
+      let touched = false;
+      const content = m.content.map((block) => {
+        const b = block as { type?: string; text?: string; thinking?: string };
+        if (b?.type === "text" && typeof b.text === "string") {
+          const cut = cleanedText(b.text);
+          if (cut !== null) {
+            touched = true;
+            return { ...b, text: cut };
+          }
+        } else if (b?.type === "thinking" && typeof b.thinking === "string") {
+          const cut = cleanedText(b.thinking);
+          if (cut !== null) {
+            touched = true;
+            return { ...b, thinking: cut };
+          }
+        }
+        return block;
+      });
+      if (!touched) return msg;
+      changed += 1;
+      return { ...m, content } as typeof msg;
+    });
+    if (changed === 0) return;
+    if (!cleanedNotified && ctx.hasUI) {
+      cleanedNotified = true;
+      ctx.ui.notify(`Anti-loop: removed repeated output from ${changed} earlier repl${changed === 1 ? "y" : "ies"} before sending.`, "info");
+    }
+    return { messages };
+  });
+
   /** One "looks stuck" notice per turn; it also marks the run as stuck for user-help. */
   function maybeNotifyChurn(ctx: ExtensionContext, config: AntiLoopConfig) {
     if (
@@ -434,6 +508,17 @@ export default function (pi: ExtensionAPI) {
   // Catch reasoning thrash mid-stream before it burns the full output budget.
   pi.on("message_update", async (event, ctx) => {
     const config = cfg(ctx);
+    if (config.enabled && config.detectRunaway && !hardStopped && !thinkingLoopFired) {
+      const reply = replyOf(event.message);
+      if (reply.length < runawayCheckedAt) runawayCheckedAt = 0; // a new reply began
+      if (reply.length - runawayCheckedAt >= CHECK_EVERY) {
+        runawayCheckedAt = reply.length;
+        if (runawayKind(reply)) {
+          recoverRunaway(ctx, config);
+          return;
+        }
+      }
+    }
     if (!config.enabled || !config.detectThinkingLoops || hardStopped || thinkingLoopFired) {
       return;
     }
@@ -450,6 +535,12 @@ export default function (pi: ExtensionAPI) {
     if (!config.enabled || hardStopped) return;
 
     const stop = extractStopInfo(event.message);
+    runawayCheckedAt = 0;
+    // A reply that ran away must not be told to "continue from where you stopped".
+    if (config.detectRunaway && !thinkingLoopFired && runawayKind(replyOf(event.message))) {
+      tryRecover(ctx, config, RUNAWAY_STEER, "runaway");
+      return;
+    }
     if (config.recoverOnTruncation && isOutputTruncated(stop)) {
       tryRecover(ctx, config, TRUNCATION_STEER, "truncation");
       return;
@@ -491,7 +582,8 @@ export default function (pi: ExtensionAPI) {
     for (let i = messages.length - 1; i >= 0; i--) {
       const stop = extractStopInfo(messages[i]);
       if (config.recoverOnTruncation && isOutputTruncated(stop)) {
-        tryRecover(ctx, config, TRUNCATION_STEER, "truncation");
+        const ranAway = config.detectRunaway && runawayKind(replyOf(messages[i]));
+        tryRecover(ctx, config, ranAway ? RUNAWAY_STEER : TRUNCATION_STEER, ranAway ? "runaway" : "truncation");
         return;
       }
       if (config.recoverGhostToolCalls) {
@@ -554,6 +646,7 @@ export default function (pi: ExtensionAPI) {
           `maxRecoveries=${fresh.maxRecoveries} · trunc=${fresh.recoverOnTruncation ? "on" : "off"} · ` +
           `stuckPhrases=${fresh.detectStuckPhrases ? "on" : "off"} · ` +
           `thinkingLoops=${fresh.detectThinkingLoops ? `on(≥${fresh.thinkingLoopMinRepeats})` : "off"} · ` +
+          `runaway=${fresh.detectRunaway ? "on" : "off"} · ` +
           `ghostTools=${fresh.recoverGhostToolCalls ? "on" : "off"} · ` +
           `userHelp=${fresh.userHelp ? "on" : "off"}` +
           (userHelpActive ? " · USER-HELP" : "") +
