@@ -5,7 +5,8 @@ import * as path from "node:path";
 import { loadConfig, type BrowserConsoleConfig } from "./config";
 import { CdpBrowser, isWebFile, formatReportForConfig, formatNetworkReport, formatStatus, isFailureEntry } from "./cdp";
 import { ensureDebugBrowserRunning, isCdpConnectionError } from "./launch";
-import { BROWSER_CORE } from "./procedure";
+import { BROWSER_CORE, BROWSER_CORE_BLIND } from "./procedure";
+import { isBlind, onEyesChange } from "../shared/eyes";
 import type { ConsoleEntry } from "./types";
 import type { PageTarget } from "./types";
 import { ensurePlaywrightProjectDeps } from "../scenarios/engine";
@@ -138,7 +139,8 @@ export default function (pi: ExtensionAPI) {
     if (!ok || !browser.connected) {
       throw new Error(
         "Browser CDP not available after auto-launch attempt. " +
-          "Use browser_screenshot for visuals (Playwright fallback), or set browserExecutable in browser-console.config.json.",
+          (isBlind(ctx) ? "" : "Use browser_screenshot for visuals (Playwright fallback), or ") +
+          "set browserExecutable in browser-console.config.json.",
       );
     }
   }
@@ -182,8 +184,11 @@ export default function (pi: ExtensionAPI) {
   function syncTools(ctx: ExtensionContext) {
     const config = cfg(ctx);
     const web = config.enabled && shouldInjectWebProcedure(ctx.cwd, changedWebFiles);
-    syncOwnedTools(pi, TOOLS, web ? MODEL_TOOLS : []);
+    // A model that cannot see (and has nothing to describe images for it) gets no screenshot tool.
+    const tools = isBlind(ctx) ? MODEL_TOOLS.filter((t) => t !== "browser_screenshot") : MODEL_TOOLS;
+    syncOwnedTools(pi, TOOLS, web ? tools : []);
   }
+  onEyesChange((ctx) => syncTools(ctx));
 
   pi.on("input", async (_event, ctx) => {
     configCache = null;
@@ -208,7 +213,7 @@ export default function (pi: ExtensionAPI) {
     // Keep Lane B short — scenarios extension owns the A/B decision table when web is relevant.
     if (!shouldInjectWebProcedure(ctx.cwd, changedWebFiles)) return;
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${BROWSER_CORE}`,
+      systemPrompt: `${event.systemPrompt}\n\n${isBlind(ctx) ? BROWSER_CORE_BLIND : BROWSER_CORE}`,
     };
   });
 

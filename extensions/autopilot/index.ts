@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { isBlind } from "../shared/eyes";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -511,6 +512,13 @@ export default function (pi: ExtensionAPI) {
     abortPending = false; // a continuation (or a new prompt) is running: not an Esc
   });
 
+  // A session too large to compact makes every next turn fail the same way: nudging would
+  // only grow it, and the items would be blocked for "no progress" that was never theirs.
+  pi.on("session_compact_failed", async (event, ctx) => {
+    if (event.aborted || run?.status !== "running") return;
+    stopRun(ctx, "paused", `compaction failed — the session is too large (${(event.errorMessage ?? "").slice(0, 120)})`);
+  });
+
   pi.on("agent_settled", async (_event, ctx) => {
     if (!abortPending) return;
     abortPending = false;
@@ -635,7 +643,7 @@ export default function (pi: ExtensionAPI) {
         saveRun(ctx);
         if (!tryClaimGate("autopilot")) return;
         editsAtBrief = editSerial;
-        pi.sendUserMessage(buildMomentCheckPrompt(momentCheck.moment, momentCheck.items, momentCheck.exp, momentCheck.points), { deliverAs: "followUp" });
+        pi.sendUserMessage(buildMomentCheckPrompt(momentCheck.moment, momentCheck.items, momentCheck.exp, momentCheck.points, isBlind(ctx)), { deliverAs: "followUp" });
         return;
       }
 

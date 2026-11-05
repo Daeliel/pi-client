@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadConfig, persistEnabled, type AntiLoopConfig } from "./config";
 import {
+  CONTEXT_FULL_RESUME,
   extractAssistantText,
   extractAssistantThinking,
   extractStopInfo,
@@ -8,6 +9,7 @@ import {
   ghostToolSteer,
   HARD_STOP_MSG,
   hasStuckPhrase,
+  isContextFull,
   isOutputTruncated,
   isThinkingLoop,
   REPEAT_STEER,
@@ -151,6 +153,43 @@ export default function (pi: ExtensionAPI) {
     afterAbort = { text, epoch: recoveryEpoch };
     ctx.abort();
   }
+
+  /**
+   * No room left for a reply (see isContextFull). Make room once — compact, then pick up the
+   * task — instead of steering a model that had nothing to answer with; tell the user plainly
+   * when even that does not help. Not counted as a recovery: nothing went wrong with the model.
+   */
+  let contextFullTried = false;
+  let compactWhenSettled = false;
+
+  function handleContextFull(ctx: ExtensionContext, message: unknown) {
+    steeredThisTurn = true;
+    const u = (message as { usage?: { input?: number; cacheRead?: number; cacheWrite?: number } }).usage ?? {};
+    const used = Math.round(((u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0)) / 1000);
+    const window = Math.round((ctx.model?.contextWindow ?? 0) / 1000);
+    if (contextFullTried) {
+      if (ctx.hasUI) {
+        ctx.ui.notify(`Anti-loop: still no room for a reply (~${used}K of ${window}K tokens) after making room. Start a fresh session (/new) with a short hand-over, or use a model with a larger window.`, "error");
+      }
+      return;
+    }
+    contextFullTried = true;
+    compactWhenSettled = true;
+    if (ctx.hasUI) ctx.ui.notify(`Anti-loop: no room left for a reply (~${used}K of ${window}K tokens) — compacting, then continuing.`, "warning");
+  }
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    if (!compactWhenSettled) return;
+    compactWhenSettled = false;
+    ctx.compact({
+      onComplete: () => pi.sendUserMessage(CONTEXT_FULL_RESUME),
+      onError: (error) => {
+        if (ctx.hasUI) {
+          ctx.ui.notify(`Anti-loop: could not make room (${error.message.slice(0, 160)}). Start a fresh session (/new) with a short hand-over, or use a model with a larger window.`, "error");
+        }
+      },
+    });
+  });
 
   pi.on("agent_settled", async () => {
     const next = afterAbort;
@@ -536,6 +575,11 @@ export default function (pi: ExtensionAPI) {
 
     const stop = extractStopInfo(event.message);
     runawayCheckedAt = 0;
+    if (isContextFull(event.message, ctx.model?.contextWindow ?? 0)) {
+      handleContextFull(ctx, event.message);
+      return;
+    }
+    if ((event.message as { role?: string }).role === "assistant") contextFullTried = false;
     // A reply that ran away must not be told to "continue from where you stopped".
     if (config.detectRunaway && !thinkingLoopFired && runawayKind(replyOf(event.message))) {
       tryRecover(ctx, config, RUNAWAY_STEER, "runaway");
@@ -581,6 +625,10 @@ export default function (pi: ExtensionAPI) {
     const messages = event.messages ?? [];
     for (let i = messages.length - 1; i >= 0; i--) {
       const stop = extractStopInfo(messages[i]);
+      if (isContextFull(messages[i], ctx.model?.contextWindow ?? 0)) {
+        handleContextFull(ctx, messages[i]);
+        return;
+      }
       if (config.recoverOnTruncation && isOutputTruncated(stop)) {
         const ranAway = config.detectRunaway && runawayKind(replyOf(messages[i]));
         tryRecover(ctx, config, ranAway ? RUNAWAY_STEER : TRUNCATION_STEER, ranAway ? "runaway" : "truncation");

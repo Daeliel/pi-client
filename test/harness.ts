@@ -64,6 +64,10 @@ export interface HarnessOptions {
    * select resolves undefined and confirm false unless overridden.
    */
   ui?: Record<string, (...args: never[]) => unknown>;
+  /** The session model's window and output limit (default 131072 / 8192). */
+  limits?: { contextWindow: number; maxTokens: number };
+  /** Session settings, e.g. { compaction: { enabled: false } }. */
+  settings?: Parameters<typeof SettingsManager.inMemory>[0];
 }
 
 export interface Harness {
@@ -106,7 +110,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   const faux = fauxProvider({
     provider: "faux",
     models: [
-      { id: "small", input: opts.input ?? ["text"], reasoning: true, contextWindow: 131072, maxTokens: 8192 },
+      { id: "small", input: opts.input ?? ["text"], reasoning: true, contextWindow: 131072, maxTokens: 8192, ...opts.limits },
       ...(opts.extraModels ?? []).map((m) => ({ ...m, contextWindow: 131072, maxTokens: 8192 })),
     ],
     tokensPerSecond: 1_000_000,
@@ -143,7 +147,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
     modelRuntime,
     resourceLoader: loader,
     sessionManager: SessionManager.inMemory(cwd),
-    settingsManager: SettingsManager.inMemory(),
+    settingsManager: SettingsManager.inMemory(opts.settings),
   });
   await session.bindExtensions(opts.ui ? { uiContext: fakeUi(opts.ui) } : {});
 

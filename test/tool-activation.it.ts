@@ -11,8 +11,13 @@ import { createHarness, reply, seenBy, writeProjectConfig } from "./harness";
 
 const ALL = [verify, scenarios, browser, research, release, polish, expand];
 
-async function toolsFor(prompt: string, files: Record<string, string>, configs: Record<string, unknown> = {}) {
-  const h = await createHarness({ extensions: ALL, files });
+async function toolsFor(
+  prompt: string,
+  files: Record<string, string>,
+  configs: Record<string, unknown> = {},
+  opts: Partial<Parameters<typeof createHarness>[0]> = {},
+) {
+  const h = await createHarness({ extensions: ALL, files, ...opts });
   try {
     for (const [name, value] of Object.entries(configs)) writeProjectConfig(h.cwd, name, value);
     let names: string[] = [];
@@ -45,15 +50,31 @@ describe("tool activation", () => {
     assert.doesNotMatch(system, /web_search/, "no research lane without a key");
   });
 
+  const webApp = { "package.json": JSON.stringify({ scripts: { dev: "vite" } }), "index.html": "<html></html>" };
+
   it("a web UI project gets the browser lane and polish for UI work", async () => {
-    const { names } = await toolsFor("build a settings page", {
-      "package.json": JSON.stringify({ scripts: { dev: "vite" } }),
-      "index.html": "<html></html>",
-    });
-    for (const present of ["browser_errors", "capture_page_screenshot", "polish_report"]) {
+    const { names } = await toolsFor("build a settings page", webApp, {}, { input: ["text", "image"] });
+    for (const present of ["browser_errors", "capture_page_screenshot", "browser_screenshot", "play", "polish_report"]) {
       assert.ok(names.includes(present), `${present} should be active: ${names.join(", ")}`);
     }
     assert.ok(!names.includes("browser_connect"), "connection management stays on /browser");
+  });
+
+  it("a model that cannot see images, with nothing to describe them, gets no screenshot tools and no screenshot proof", async () => {
+    const { names, system } = await toolsFor("build a settings page", webApp);
+    for (const absent of ["capture_page_screenshot", "browser_screenshot", "play", "play_save_spec", "confirm_visual_qa"]) {
+      assert.ok(!names.includes(absent), `${absent} should be inactive: ${names.join(", ")}`);
+    }
+    for (const present of ["browser_errors", "run_scenarios"]) assert.ok(names.includes(present), `${present} should be active`);
+    assert.doesNotMatch(system, /Save a screenshot|look at each screenshot|before\/after screenshots|browser_screenshot/);
+    assert.match(system, /You cannot see images/);
+  });
+
+  it("a text-only model with a vision model to describe images keeps the screenshot tools", async () => {
+    const { names } = await toolsFor("build a settings page", webApp, {}, { extraModels: [{ id: "eyes", input: ["text", "image"] }] });
+    for (const present of ["capture_page_screenshot", "browser_screenshot", "play"]) {
+      assert.ok(names.includes(present), `${present} should be active: ${names.join(", ")}`);
+    }
   });
 
   it("a Flutter Android project gets the release tools", async () => {

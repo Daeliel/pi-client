@@ -363,7 +363,12 @@ export function isJourneySpec(text: string): boolean {
 export interface SpecScanOptions {
   /** Project renders its UI into a canvas (e.g. Flutter web): apply canvas rules to every spec. */
   canvasProject?: boolean;
+  /** The model cannot see images: layout proof is measured in the spec, not screenshots it would have to review. */
+  blind?: boolean;
 }
+
+/** Proof a model can read without seeing: measured boxes, computed styles, scroll position, text. */
+const READABLE_LAYOUT_PROOF = /boundingBox\(|getComputedStyle|scrollTop|scrollY|toHaveCSS|toHaveText|toContainText|page\.evaluate\(/;
 
 /**
  * Scan one spec file's source for weak/forbidden proof patterns.
@@ -495,7 +500,16 @@ export function scanSpecFileContent(rel: string, text: string, options: SpecScan
     });
   }
 
-  if (layoutSpec && CANVAS_ONLY_ASSERT.test(text) && screenshotCount < 2) {
+  if (options.blind) {
+    if (layoutSpec && (CANVAS_ONLY_ASSERT.test(text) || hasScroll) && !READABLE_LAYOUT_PROOF.test(text)) {
+      warnings.push({
+        file: rel,
+        blocking: true,
+        message:
+          "Layout spec has no proof you can read — measure it: boundingBox() before and after, scroll position, or state/styles read with page.evaluate. You cannot see images, so screenshots do not count.",
+      });
+    }
+  } else if (layoutSpec && CANVAS_ONLY_ASSERT.test(text) && screenshotCount < 2) {
     warnings.push({
       file: rel,
       blocking: true,
@@ -504,7 +518,7 @@ export function scanSpecFileContent(rel: string, text: string, options: SpecScan
     });
   }
 
-  if (layoutSpec && hasScroll && screenshotCount < 2 && !/scrollAndCapture/.test(text)) {
+  if (!options.blind && layoutSpec && hasScroll && screenshotCount < 2 && !/scrollAndCapture/.test(text)) {
     warnings.push({
       file: rel,
       blocking: true,
@@ -538,7 +552,7 @@ export function scanSpecPatterns(cwd: string, config: ScenariosConfig): SpecPatt
       return;
     }
     const rel = path.relative(cwd, abs).replace(/\\/g, "/");
-    warnings.push(...scanSpecFileContent(rel, text, { canvasProject }));
+    warnings.push(...scanSpecFileContent(rel, text, { canvasProject, blind: config.modelBlind }));
   });
 
   return warnings;

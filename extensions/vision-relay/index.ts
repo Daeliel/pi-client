@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   inputImagesToRelay,
   listVisionModels,
@@ -10,6 +10,7 @@ import {
   sessionSeesImages,
 } from "../shared/vision-relay";
 import { trimImages } from "../shared/image-budget";
+import { checkEyes } from "../shared/eyes";
 
 export default function (pi: ExtensionAPI) {
   // Every request carries the whole conversation: keep its images under the byte budget.
@@ -28,6 +29,29 @@ export default function (pi: ExtensionAPI) {
     }
     return { messages: trimmed.messages };
   });
+
+  /**
+   * A text-only model with nothing that can describe images for it: say so when it is picked,
+   * not at the first screenshot. Once per model and reason, and in the background — a down
+   * server takes a moment to time out.
+   */
+  let lastWarning = "";
+  function warnIfBlind(ctx: ExtensionContext) {
+    if (!ctx.hasUI || !ctx.model || sessionSeesImages(ctx)) return;
+    const session = `${ctx.model.provider}/${ctx.model.id}`;
+    void checkEyes(ctx).then((eyes) => {
+      if (!eyes.blind) return;
+      const warning = `${session}|${eyes.reason}`;
+      if (warning === lastWarning) return;
+      lastWarning = warning;
+      ctx.ui.notify(
+        `Vision: ${session} cannot see images, and ${eyes.reason}. Checks will not ask it for screenshots; visual checks are left to you. /vision for details.`,
+        "warning",
+      );
+    }, () => {});
+  }
+  pi.on("session_start", async (_event, ctx) => warnIfBlind(ctx));
+  pi.on("model_select", async (_event, ctx) => warnIfBlind(ctx));
 
   pi.on("input", async (event, ctx) => {
     const images = inputImagesToRelay(event.images);
@@ -81,8 +105,8 @@ export default function (pi: ExtensionAPI) {
       const config = loadVisionRelayConfig(ctx.cwd);
       const session = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none";
       const sees = sessionSeesImages(ctx) ? "sees images" : "text-only";
-      const picked = pickRelayModel(ctx, config.relayModel);
-      const models = listVisionModels(ctx);
+      const picked = await pickRelayModel(ctx, config.relayModel);
+      const models = listVisionModels(ctx).map((m) => (picked.down.includes(m) ? `${m}  (server not answering)` : m));
       ctx.ui.notify(
         [
           `Vision relay: ${config.enabled ? "ON" : "OFF"} · model: ${config.relayModel || "(auto)"}` +

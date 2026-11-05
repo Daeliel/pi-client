@@ -39,13 +39,20 @@ export interface LiveProvider {
   templates: Array<Record<string, unknown> & { id: string }>;
 }
 
-/** What an OpenAI-compatible /models lists (vLLM, llama.cpp, LM Studio and gateways add the limits). */
+/**
+ * What an OpenAI-compatible /models lists. The window and image support are not standard:
+ * vLLM adds `max_model_len`, llama.cpp `meta.n_ctx` and `architecture.input_modalities`, some
+ * gateways `context_window` / `context_length` and `capabilities`. Servers that list neither
+ * (LM Studio, Ollama, older llama.cpp) are asked through their own API — see `enrichServed`.
+ */
 export interface ServedModel {
   id: string;
   context_window?: number;
   context_length?: number;
   max_model_len?: number;
   capabilities?: string[];
+  meta?: { n_ctx?: number };
+  architecture?: { input_modalities?: string[] };
 }
 
 export function liveProviders(modelsJson: unknown): LiveProvider[] {
@@ -89,9 +96,10 @@ const IMAGE_CAPS = new Set(["see", "vision", "image", "images", "multimodal"]);
 
 export function toModelConfig(served: ServedModel, provider: LiveProvider): ProviderModelConfig {
   const t = pickTemplate(served.id, provider.templates) as Record<string, unknown> | undefined;
-  const ctx = served.context_window ?? served.context_length ?? served.max_model_len ?? (t?.contextWindow as number | undefined) ?? 131072;
-  const input: ("text" | "image")[] = served.capabilities
-    ? served.capabilities.some((c) => IMAGE_CAPS.has(c.toLowerCase()))
+  const ctx = servedWindow(served) ?? (t?.contextWindow as number | undefined) ?? 131072;
+  const caps = served.capabilities ?? served.architecture?.input_modalities;
+  const input: ("text" | "image")[] = caps
+    ? caps.some((c) => IMAGE_CAPS.has(c.toLowerCase()))
       ? ["text", "image"]
       : ["text"]
     : ((t?.input as ("text" | "image")[] | undefined) ?? ["text"]);
@@ -111,6 +119,76 @@ export function toModelConfig(served: ServedModel, provider: LiveProvider): Prov
   for (const k of ["thinkingLevelMap", "samplingParams", "headers", "promptCache"]) if (t?.[k] !== undefined) model[k] = t[k];
   if (Object.keys(compat).length) model.compat = compat;
   return model as unknown as ProviderModelConfig;
+}
+
+export function servedWindow(served: ServedModel): number | undefined {
+  const n = served.context_window ?? served.context_length ?? served.max_model_len ?? served.meta?.n_ctx;
+  return typeof n === "number" && n > 0 ? n : undefined;
+}
+
+type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
+
+async function getJson(fetchFn: Fetch, url: string, init: RequestInit): Promise<unknown> {
+  try {
+    const res = await fetchFn(url, init);
+    return res.ok ? await res.json() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Fill in the window and image support a server left out of /models, from where each kind of
+ * server reports them. Each answer is checked by shape, so asking the wrong kind of server
+ * costs a 404 and changes nothing.
+ * - llama.cpp: GET /props — `default_generation_settings.n_ctx` (the window one request gets,
+ *   after the slots split it) and `modalities.vision`.
+ * - LM Studio: GET /api/v0/models — `loaded_context_length` and `type: "vlm"`.
+ * - Ollama: GET /api/ps — `context_length` of the loaded model; POST /api/show — `capabilities`.
+ *   A model's training length is not used: Ollama serves far less unless told otherwise.
+ */
+export async function enrichServed(provider: LiveProvider, served: ServedModel[], signal: AbortSignal, fetchFn: Fetch = fetch): Promise<ServedModel[]> {
+  const isLlamaCpp = served.some((m) => m.meta !== undefined);
+  const needWindow = served.some((m) => servedWindow(m) === undefined) || isLlamaCpp;
+  const needImages = served.some((m) => !m.capabilities && !m.architecture?.input_modalities);
+  if (!needWindow && !needImages) return served;
+  const root = provider.baseUrl.replace(/\/v1$/, "");
+  const key = resolveKey(provider.apiKey);
+  const headers = { ...(key ? { Authorization: `Bearer ${key}` } : {}), ...(provider.headers ?? {}) };
+  const init = { headers, signal };
+
+  const [props, lms, ps] = await Promise.all([
+    getJson(fetchFn, `${root}/props`, init),
+    getJson(fetchFn, `${root}/api/v0/models`, init),
+    getJson(fetchFn, `${root}/api/ps`, init),
+  ]);
+  const llama = props as { default_generation_settings?: { n_ctx?: number }; modalities?: { vision?: boolean } } | undefined;
+  const lmsModels = ((lms as { data?: unknown[] } | undefined)?.data ?? []) as { id?: string; type?: string; loaded_context_length?: number }[];
+  const ollamaLoaded = ((ps as { models?: unknown[] } | undefined)?.models ?? []) as { name?: string; model?: string; context_length?: number }[];
+  const isOllama = Array.isArray((ps as { models?: unknown } | undefined)?.models);
+
+  return Promise.all(
+    served.map(async (m) => {
+      const out: ServedModel = { ...m };
+      const slotWindow = llama?.default_generation_settings?.n_ctx;
+      if (typeof slotWindow === "number" && slotWindow > 0 && served.length === 1) {
+        out.context_window = slotWindow; // more exact than meta.n_ctx when slots split the window
+        if (!out.capabilities && typeof llama?.modalities?.vision === "boolean") out.capabilities = llama.modalities.vision ? ["text", "vision"] : ["text"];
+      }
+      const lm = lmsModels.find((x) => x.id === m.id);
+      if (lm) {
+        if (servedWindow(out) === undefined && typeof lm.loaded_context_length === "number") out.context_window = lm.loaded_context_length;
+        if (!out.capabilities && typeof lm.type === "string") out.capabilities = lm.type === "vlm" ? ["text", "vision"] : ["text"];
+      }
+      const ol = ollamaLoaded.find((x) => x.name === m.id || x.model === m.id);
+      if (ol && servedWindow(out) === undefined && typeof ol.context_length === "number") out.context_window = ol.context_length;
+      if (isOllama && !out.capabilities) {
+        const show = (await getJson(fetchFn, `${root}/api/show`, { ...init, method: "POST", body: JSON.stringify({ model: m.id }) })) as { capabilities?: string[] } | undefined;
+        if (Array.isArray(show?.capabilities)) out.capabilities = show.capabilities.includes("vision") ? ["text", "vision"] : ["text"];
+      }
+      return out;
+    }),
+  );
 }
 
 /** settings.json may name the default model with its provider in front: `local-gpu/qwen3.6-27b`. */
@@ -188,6 +266,7 @@ export default async function (pi: ExtensionAPI) {
     try {
       served = await fetchServed(p, s);
       if (served.length === 0) throw new Error("no model loaded");
+      served = await enrichServed(p, served, s);
     } catch (e) {
       failed.set(p.name, e instanceof Error ? e.message : String(e));
       throw e;

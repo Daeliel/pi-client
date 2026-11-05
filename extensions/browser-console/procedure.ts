@@ -1,4 +1,4 @@
-import { WEB_TOOLING_CORE, WEB_LANE_DETAILS } from "../shared/web-tooling-guide";
+import { webLaneDetails, webToolingCore } from "../shared/web-tooling-guide";
 
 /** Short Lane B core — web details only when web procedure is injected. */
 export const BROWSER_CORE = `
@@ -11,9 +11,13 @@ Do NOT use for clicks or acceptance proof → Lane A (run_scenarios).
 Tools auto-connect / auto-launch debug Chrome when needed.
 `.trim();
 
-export function buildBrowserProcedure(includeWebGuide: boolean): string {
-  if (!includeWebGuide) return BROWSER_CORE;
-  return `${WEB_TOOLING_CORE}\n\n${WEB_LANE_DETAILS}\n\n${BROWSER_CORE}`;
+/** For a model that cannot see images: no browser_screenshot. */
+export const BROWSER_CORE_BLIND = BROWSER_CORE.replace(", browser_screenshot (cosmetic)", "");
+
+export function buildBrowserProcedure(includeWebGuide: boolean, blind = false): string {
+  const core = blind ? BROWSER_CORE_BLIND : BROWSER_CORE;
+  if (!includeWebGuide) return core;
+  return `${webToolingCore(blind)}\n\n${webLaneDetails(blind)}\n\n${core}`;
 }
 
 /** @deprecated Prefer buildBrowserProcedure(includeWebGuide). */

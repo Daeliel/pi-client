@@ -38,7 +38,9 @@
       "./extensions/vision-relay",
       "./extensions/playtest",
       "./extensions/notify",
-      "./extensions/live-models"
+      "./extensions/live-models",
+      "./extensions/compaction",
+      "./extensions/context-budget"
     ],
     "skills": [
       "./skills"

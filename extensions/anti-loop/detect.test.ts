@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   extractStopInfo,
+  isContextFull,
   findGhostToolCall,
   hasStuckPhrase,
   isOutputTruncated,
@@ -185,3 +186,17 @@ describe("findGhostToolCall", () => {
   });
 });
 
+describe("context full", () => {
+  const reply = (output: number, input: number, cacheRead = 0) => ({ role: "assistant", stopReason: "length", usage: { input, output, cacheRead, cacheWrite: 0 } });
+  it("a one-token reply with the window nearly full is no room, not truncation", () => {
+    // From a real session: 32K window, 28,569 tokens in, 1 token out.
+    assert.equal(isContextFull(reply(1, 98, 28_565), 32_768), true);
+    assert.equal(isContextFull(reply(1, 28_569), 32_768), true);
+  });
+  it("a long reply cut at the output limit, or a short context, is not", () => {
+    assert.equal(isContextFull(reply(8192, 28_000), 32_768), false);
+    assert.equal(isContextFull(reply(1, 9_000), 32_768), false);
+    assert.equal(isContextFull({ ...reply(1, 30_000), stopReason: "stop" }, 32_768), false);
+    assert.equal(isContextFull(reply(1, 30_000), 0), false);
+  });
+});

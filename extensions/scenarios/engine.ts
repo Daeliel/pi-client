@@ -357,7 +357,7 @@ export async function runScenarios(
           if (!fs.existsSync(abs)) return [];
           try {
             const text = fs.readFileSync(abs, "utf8");
-            return scanSpecFileContent(c.testFile.replace(/\\/g, "/"), text, { canvasProject });
+            return scanSpecFileContent(c.testFile.replace(/\\/g, "/"), text, { canvasProject, blind: config.modelBlind });
           } catch {
             return [];
           }

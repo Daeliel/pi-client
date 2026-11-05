@@ -8,6 +8,18 @@ description: General playbook for UI/layout/visual bugs and wrong-screen content
 Use this for any report like "X covers Y", "element is too big", "layout broke after
 click" — not only web apps with DOM; also canvas/Flutter web.
 
+## If you cannot see images
+
+When you are a text-only model and nothing describes images for you (screenshot tools are
+not offered to you then), a screenshot proves nothing to you — do not take, open or review
+one. Every step below still applies, with readable proof in place of each screenshot:
+
+- **Wrong/empty screen** → assert the text and controls that screen shows (`toHaveText`, `getByRole`).
+- **Size, position, overlap** → `boundingBox()` before and after (the overlap snippet below).
+- **Colour, opacity, hidden** → `getComputedStyle` read with `page.evaluate`, or `toHaveCSS`.
+- **Canvas** → read state through a test hook (`page.evaluate(() => window.__game.state())`) or the semantics tree.
+- What none of these can show (art, feel), tell the user plainly that they need to check it.
+
 ## Symptom-first (any app)
 
 When the user names a **specific screen, tab, menu, or level** ("History is empty", "inventory wrong"):

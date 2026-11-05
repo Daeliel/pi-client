@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { isBlind } from "../shared/eyes";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { readBlueprint, tierCounts } from "./blueprint";
@@ -67,14 +68,14 @@ export default function (pi: ExtensionAPI) {
     const c = momentContext(ctx.cwd, config, pending.id);
     if (!c || !tryClaimGate("plan")) return;
     markAsked(ctx.cwd, config, pending.id);
-    pi.sendUserMessage(buildMomentCheckPrompt(c.moment, c.items, c.exp, c.points), { deliverAs: "followUp" });
+    pi.sendUserMessage(buildMomentCheckPrompt(c.moment, c.items, c.exp, c.points, isBlind(ctx)), { deliverAs: "followUp" });
   });
 
   pi.registerTool({
     name: "moment_check",
     label: "Moment Check",
     description:
-      "Report a moment check: your narration of the moment as the code now behaves, every difference from the plan, and a screenshot of the moment. " +
+      "Report a moment check: your narration of the moment as the code now behaves, every difference from the plan, and — when a model here can see images — a screenshot of the moment. " +
       "A separate look that sees only the screenshot answers questions about it; you compare.",
     parameters: Type.Object({
       moment: Type.String({ description: "Moment id, e.g. M-03." }),

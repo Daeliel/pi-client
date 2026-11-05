@@ -147,14 +147,68 @@ export function rankRelayCandidates(available: string[], sessionProvider: string
   return [...sameProvider, ...rest];
 }
 
-/** Configured relay, or the best-ranked vision model that is not the session model. */
-export function pickRelayModel(ctx: ExtensionContext, configuredSpec: string): VisionModelResolution {
+/** How long a server's answer (or silence) is trusted before it is asked again. */
+const PROBE_TTL_MS = 30_000;
+const PROBE_TIMEOUT_MS = 1500;
+const probed = new Map<string, { up: boolean; at: number }>();
+
+/**
+ * Whether a model's server answers at all. Any HTTP answer counts (a cloud API says 401
+ * without a key in the probe); only no connection or a timeout is down. A model with no
+ * real address (port 0, no URL) is not asked.
+ */
+export async function serverUp(baseUrl: string | undefined, now = Date.now()): Promise<boolean> {
+  let url: URL;
+  try {
+    url = new URL(baseUrl ?? "");
+  } catch {
+    return true;
+  }
+  if (!/^https?:$/.test(url.protocol) || url.port === "0") return true;
+  const seen = probed.get(url.origin + url.pathname);
+  if (seen && now - seen.at < PROBE_TTL_MS) return seen.up;
+  let up = true;
+  try {
+    await fetch(`${baseUrl!.replace(/\/+$/, "")}/models`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+  } catch {
+    up = false;
+  }
+  probed.set(url.origin + url.pathname, { up, at: Date.now() });
+  return up;
+}
+
+export interface RelayPick extends VisionModelResolution {
+  /** Vision models skipped because their server is not answering. */
+  down: string[];
+}
+
+type IsUp = (model: AnyModel) => Promise<boolean>;
+const defaultIsUp: IsUp = (model) => serverUp((model as { baseUrl?: string }).baseUrl);
+
+/**
+ * Configured relay, or the best-ranked vision model that is not the session model and whose
+ * server answers. A configured relay is never swapped for another: if it is down, that is the answer.
+ */
+export async function pickRelayModel(ctx: ExtensionContext, configuredSpec: string, isUp: IsUp = defaultIsUp): Promise<RelayPick> {
   const trimmed = configuredSpec.trim();
-  if (trimmed) return resolveVisionModel(ctx, trimmed, { kind: "relay model" });
+  if (trimmed) {
+    const res = resolveVisionModel(ctx, trimmed, { kind: "relay model" });
+    if (res.model && !(await isUp(res.model))) {
+      return { model: null, reason: `relay model ${trimmed} is set, but its server is not answering`, down: [trimmed] };
+    }
+    return { ...res, down: [] };
+  }
   const sessionKey = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
-  const pick = rankRelayCandidates(listVisionModels(ctx), ctx.model?.provider, sessionKey)[0];
-  if (!pick) return { model: null, reason: "no vision-capable model with auth in models.json" };
-  return resolveVisionModel(ctx, pick, { kind: "relay model" });
+  const ranked = rankRelayCandidates(listVisionModels(ctx), ctx.model?.provider, sessionKey);
+  if (ranked.length === 0) return { model: null, reason: "no vision-capable model with auth in models.json", down: [] };
+  const resolved = ranked.map((spec) => ({ spec, res: resolveVisionModel(ctx, spec, { kind: "relay model" }) }));
+  // Ask every server at once: one down server must not add its timeout to the next one's.
+  const up = await Promise.all(resolved.map(({ res }) => (res.model ? isUp(res.model) : Promise.resolve(false))));
+  const down = resolved.filter(({ res }, i) => res.model && !up[i]).map(({ spec }) => spec);
+  const first = resolved.findIndex(({ res }, i) => res.model && up[i]);
+  if (first >= 0) return { model: resolved[first]!.res.model, down };
+  if (down.length) return { model: null, reason: `no vision model is answering (${down.join(", ")} not reachable)`, down };
+  return { model: null, reason: resolved[0]!.res.reason ?? "no usable vision model", down };
 }
 
 /** Pull Pi `input` event images into the shape the relay already captions. */
@@ -223,7 +277,7 @@ export async function presentVisionToSession(
         `Ask the user to describe what the image shows before acting on it.]`
       : `${buildVisionMessage(intro, paths, opts.checklist ?? true)}\n\n${why}`;
 
-  const picked = pickRelayModel(ctx, config.relayModel);
+  const picked = await pickRelayModel(ctx, config.relayModel);
   if (!picked.model) {
     const note =
       `Vision relay: session model is text-only and ${picked.reason}. ` +

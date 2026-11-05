@@ -43,6 +43,43 @@ export const FLUTTER_LANE_DETAILS = `
 - Reuse click coords from a passing spec in this project.
 `.trim();
 
+/**
+ * For a model that cannot see images and has nothing to describe them (see shared/eyes.ts):
+ * the same lanes, with proof it can read instead of screenshots.
+ */
+export const WEB_LANE_DETAILS_BLIND = `
+## Lane A details
+
+- Web specs must use real UI actions (click/tap/key). Forbidden: localStorage / page.evaluate to fake the flow. Reading state with page.evaluate (\`window.__game.state()\`) is fine.
+- **You cannot see images**, so a screenshot proves nothing to you: do not take, open or review screenshots. Specs may still save them for the user.
+- Prove with what you can read in the spec: \`toHaveText\` / \`toContainText\`, \`getByRole\` / \`getByText\`, values read with page.evaluate, console and page errors (attachConsoleCapture).
+- **How a screen looks:** measure it in the spec — \`boundingBox()\` for size, position and overlap; \`getComputedStyle\` via page.evaluate for colour, opacity, visibility; scroll position before and after. What cannot be measured that way (art, feel), say plainly that the user has to check it.
+- Layout bugs: one spec that measures the boxes before and after → run_scenarios. Do not code-read in a loop.
+- Optional scaffold_scenario helps start a spec; freeform specs are fine when you write solid tests yourself.
+- Failure messages may include LABEL + EVIDENCE + RAW — do not trust LABEL alone; confirm against EVIDENCE and RAW.
+`.trim();
+
+export const FLUTTER_LANE_DETAILS_BLIND = `
+## Flutter / static webServer
+
+- After Dart edits, run \`flutter build web\` before run_scenarios when Playwright serves build/web — stale UI is not proof.
+- Canvas: page.mouse.click + waits; scroll with helpers/canvas-interaction (never window.scrollBy).
+- canvas.toBeVisible() alone is not proof, and you cannot check canvas pixels: expose state through a test hook (read it with page.evaluate) or the semantics tree, and assert on that.
+- Reuse click coords from a passing spec in this project.
+`.trim();
+
+export function webToolingCore(blind: boolean): string {
+  return blind ? WEB_TOOLING_CORE.replace("; browser_screenshot is cosmetic only.", ".") : WEB_TOOLING_CORE;
+}
+
+export function webLaneDetails(blind: boolean): string {
+  return blind ? WEB_LANE_DETAILS_BLIND : WEB_LANE_DETAILS;
+}
+
+export function flutterLaneDetails(blind: boolean): string {
+  return blind ? FLUTTER_LANE_DETAILS_BLIND : FLUTTER_LANE_DETAILS;
+}
+
 /** @deprecated Prefer WEB_TOOLING_CORE + conditional lanes. Kept for any external imports. */
 export const WEB_TOOLING_SEGMENTATION = `${WEB_TOOLING_CORE}
 

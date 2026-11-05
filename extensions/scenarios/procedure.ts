@@ -1,4 +1,5 @@
-import { WEB_TOOLING_CORE, WEB_LANE_DETAILS, FLUTTER_LANE_DETAILS } from "../shared/web-tooling-guide";
+import { flutterLaneDetails, webLaneDetails, webToolingCore } from "../shared/web-tooling-guide";
+import { BLIND_PROOF } from "../shared/eyes";
 import type { StackDetection } from "../shared/stack-detect";
 import type { ResultBar, ScenarioLevel } from "./config";
 import { describeLimits, type LightLevel } from "./light";
@@ -73,18 +74,22 @@ export function buildScenariosProcedure(opts: {
   level?: ScenarioLevel;
   bar?: ResultBar;
   light?: LightLevel;
+  /** The model cannot see images and nothing describes them: proof it can read, no screenshots. */
+  blind?: boolean;
 }): string {
   const parts = [SCENARIOS_CORE, LEVEL_TEXT[opts.level ?? "thorough"], BAR_TEXT[opts.bar ?? "unset"]];
   if (opts.light && opts.light !== "off") parts.push(lightText(opts.light));
   if (opts.stackSummary) {
     parts.push(`## Detected project\n\n${opts.stackSummary}`);
   }
+  const blind = Boolean(opts.blind);
   if (opts.includeWeb) {
-    parts.push(WEB_TOOLING_CORE, WEB_LANE_DETAILS);
+    parts.push(webToolingCore(blind), webLaneDetails(blind));
   }
   if (opts.includeFlutter) {
-    parts.push(FLUTTER_LANE_DETAILS);
+    parts.push(flutterLaneDetails(blind));
   }
+  if (blind && !opts.includeWeb && !opts.includeFlutter) parts.push(BLIND_PROOF);
   return parts.join("\n\n");
 }
 

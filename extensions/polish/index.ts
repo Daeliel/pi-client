@@ -43,6 +43,7 @@ import {
 } from "./procedure";
 import { listVisionModels, resolveCriticModel, runCriticCompletion } from "./critic";
 import { presentVisionToSession } from "../shared/vision-relay";
+import { isBlind } from "../shared/eyes";
 import { loadConfig as loadScenariosConfig } from "../scenarios/config";
 import { capturePageScreenshot, loadVisionImages, type VisionImageContent } from "../scenarios/vision";
 import { isGateClaimed, resetGateClaim, tryClaimGate, registerGateReset } from "../shared/gate-orchestrator";
@@ -535,7 +536,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    const promptOpts = { surface, level: task!.level, passNumber, passCap: cap, hasScreenshot: images.length > 0, priorOpen: [...surface.open] };
+    const promptOpts = { surface, level: task!.level, passNumber, passCap: cap, hasScreenshot: images.length > 0, priorOpen: [...surface.open], blind: isBlind(ctx) };
 
     // showcase+: independent critic on a different (vision) model.
     if (levelAtLeast(task!.level, "showcase")) {
@@ -610,7 +611,7 @@ export default function (pi: ExtensionAPI) {
     showPass(ctx, surface, passNumber, cap, null, scopeSize);
     notify(ctx, `Polish pass ${passNumber}/${cap} — ${surface.name}: asking the model for the three weakest things.`);
     const text = buildSelfCritiquePrompt(promptOpts);
-    if (images.length > 0) {
+    if (images.length > 0 && !promptOpts.blind) {
       const content = await presentVisionToSession(ctx, text, images, [path.join(ctx.cwd, shotRel)]);
       pi.sendUserMessage(content, { deliverAs: "followUp" });
     } else {

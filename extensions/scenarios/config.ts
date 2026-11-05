@@ -107,6 +107,8 @@ export interface ScenariosConfig {
   autoDiscoverScenarios: boolean;
   /** Fail run_scenarios when a passing web spec matches weak/forbidden patterns (DOM scroll, canvas-only assert). */
   failOnWeakSpec: boolean;
+  /** Set at runtime, never from a file: the model cannot see images and nothing describes them (shared/eyes.ts). */
+  modelBlind?: boolean;
   /** Max images attached per vision message (context bloat cap). */
   maxScreenshotsPerRun: number;
   /** Play mode: steps (each = actions + a screenshot) per session before it asks to save or stop. */

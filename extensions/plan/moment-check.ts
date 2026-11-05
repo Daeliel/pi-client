@@ -96,13 +96,18 @@ export function screenQuestions(m: Moment): string[] {
 }
 
 /** The request sent to the model when a moment's items are all built. */
-export function buildMomentCheckPrompt(m: Moment, items: BlueprintItem[], exp: Experience, points: Point[]): string {
+/** `blind`: nothing here can see images — no screenshot step; the narration against the code is the check. */
+export function buildMomentCheckPrompt(m: Moment, items: BlueprintItem[], exp: Experience, points: Point[], blind = false): string {
   const fields = Object.entries(m.fields)
     .map(([k, v]) => `  ${k}: ${v}`)
     .join("\n");
   const served = new Set(items.flatMap(servesOf));
   const quotes = points.filter((p) => served.has(p.id));
   const readings = exp.interpretations.filter((i) => i.points.some((s) => served.has(s)));
+  const last = blind
+    ? "3. Call moment_check with the moment, your narration and the differences. No screenshot: nothing here can see images."
+    : `3. Take a screenshot of this moment as the person sees it (play to reach it, or a spec that saves one) — a separate look that sees only that image will answer questions about it.
+4. Call moment_check with the moment, your narration, the differences, and the screenshot path.`;
   return `MOMENT CHECK ${m.id} ${m.title} — all its items are built (${items.map((i) => i.id).join(", ")}). Check the moment as a whole, as the person experiences it:
 
 ${m.id} as planned:
@@ -111,8 +116,7 @@ ${quotes.length ? `\nThe source's own words:\n${quotes.map((p) => `  ${p.id}: "$
 
 1. Narrate this moment from the code as it is now — what is on screen, and what happens when the person does each thing (name the file and function). Not from memory of what you meant to build.
 2. List every difference between that narration and the plan above (fields and source words). "Clicking selects one node" vs "clicking moves the train now" is a difference.
-3. Take a screenshot of this moment as the person sees it (play to reach it, or a spec that saves one) — a separate look that sees only that image will answer questions about it.
-4. Call moment_check with the moment, your narration, the differences, and the screenshot path.`;
+${last}`;
 }
 
 /**
@@ -124,7 +128,7 @@ export async function screenCheck(ctx: ExtensionContext, screenshot: string, m: 
   if (!fs.existsSync(abs)) return { skipped: `no such screenshot: ${screenshot}` };
   const { images } = await loadVisionImages([abs], loadScenariosConfig(ctx.cwd));
   if (images.length === 0) return { skipped: "the screenshot could not be loaded" };
-  const model = sessionSeesImages(ctx) ? ctx.model : pickRelayModel(ctx, loadVisionRelayConfig(ctx.cwd).relayModel).model;
+  const model = sessionSeesImages(ctx) ? ctx.model : (await pickRelayModel(ctx, loadVisionRelayConfig(ctx.cwd).relayModel)).model;
   if (!model) return { skipped: "no model here can see images (set one with /vision model)" };
   const questions = screenQuestions(m);
   const reply = await runCriticCompletion(

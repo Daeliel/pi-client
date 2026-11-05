@@ -124,6 +124,24 @@ export function isOutputTruncated(info: AssistantStopInfo): boolean {
   return false;
 }
 
+/** Output tokens at or below which a cut-off reply had no room at all. */
+const NO_ROOM_OUTPUT = 64;
+
+/**
+ * Cut off after a few tokens while the request nearly filled the window: the provider trims
+ * the output limit to what is left, so there was no room for a reply. Not the model's doing —
+ * "continue" only adds to the full context.
+ */
+export function isContextFull(message: unknown, contextWindow: number): boolean {
+  if (!message || typeof message !== "object" || !(contextWindow > 0)) return false;
+  const msg = message as { role?: string; stopReason?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } };
+  if (msg.role !== "assistant" || msg.stopReason !== "length" || !msg.usage) return false;
+  const { input = 0, output = 0, cacheRead = 0, cacheWrite = 0 } = msg.usage;
+  return output <= NO_ROOM_OUTPUT && input + cacheRead + cacheWrite >= contextWindow * 0.75;
+}
+
+export const CONTEXT_FULL_RESUME = `The context was full, so there was no room for your reply. Earlier work has been summarized to make room. Continue with the next step of the task.`;
+
 export function extractAssistantText(message: unknown): string {
   if (!message || typeof message !== "object") return "";
   const msg = message as { role?: string; content?: unknown };

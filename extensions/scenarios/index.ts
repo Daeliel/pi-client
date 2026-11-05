@@ -77,6 +77,7 @@ import { buildSpecFromRecording, PlaySession, validateActions, type PlayAction, 
 import { syncOwnedTools } from "../shared/tool-activation";
 import { attemptNotes, giveUpNote, RepeatTracker } from "../shared/gate-messages";
 import { playtestOn } from "../shared/playtest";
+import { isBlind, onEyesChange } from "../shared/eyes";
 
 const TOOLS = [
   "scaffold_scenario",
@@ -175,9 +176,13 @@ export default function (pi: ExtensionAPI) {
   /** Play mode session (one at a time; ends with the run). */
   let play: PlaySession | null = null;
 
+  /**
+   * The config, as it applies to this model: when nothing here can see images, no screenshot
+   * is attached for the model to review (they are still saved for the user).
+   */
   function cfg(ctx: ExtensionContext): ScenariosConfig {
     if (!configCache) configCache = loadConfig(ctx.cwd);
-    return configCache;
+    return isBlind(ctx) ? { ...configCache, visionOnFailure: false, visionOnPass: false, modelBlind: true } : configCache;
   }
 
   function shouldRunQaGate(config: ScenariosConfig): boolean {
@@ -267,14 +272,16 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     const wanted = ["scaffold_scenario", "define_scenarios", "run_scenarios"];
-    if (shouldInjectWebProcedure(ctx.cwd, changedFiles)) wanted.push("capture_page_screenshot", "play", "play_save_spec");
-    if (qaMode(config) === "model") wanted.push("confirm_visual_qa");
+    // A model that cannot see gets no screenshot tools, and play (a screenshot after every step).
+    if (shouldInjectWebProcedure(ctx.cwd, changedFiles) && !config.modelBlind) wanted.push("capture_page_screenshot", "play", "play_save_spec");
+    if (qaMode(config) === "model" && !config.modelBlind) wanted.push("confirm_visual_qa");
     if (config.bar === "unset") wanted.push("set_result_bar");
     if (activeReview) wanted.push("propose_scenario_cleanup");
     if (config.light !== "off" && !autopilotRunning(ctx.cwd, loadPlanConfig(ctx.cwd).blueprintPath)) wanted.push("light_change");
     if (askOffer && ctx.hasUI) wanted.push("ask_user_to_verify");
     syncOwnedTools(pi, TOOLS, wanted);
   }
+  onEyesChange((ctx) => syncTools(ctx));
 
   pi.on("input", async (_event, ctx) => {
     configCache = null;
@@ -405,6 +412,7 @@ export default function (pi: ExtensionAPI) {
       level: config.level,
       bar: config.bar,
       light: config.light,
+      blind: config.modelBlind,
     });
 
     return {
@@ -714,6 +722,22 @@ export default function (pi: ExtensionAPI) {
         if (skippedSince(mark, "qa")) return;
         if (ctx.signal?.aborted) return;
 
+        // Nothing here can see the shot: it is never put to the model. The user gets it to look at.
+        if (config.modelBlind) {
+          visualQaConfirmed = true;
+          qaFixAttempts = 0;
+          persist();
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              capture.ok
+                ? `Visual QA is yours: the model cannot see images, so it was not asked. Screenshot: ${capture.outputPath}`
+                : `Visual QA skipped: the model cannot see images, and the screenshot failed (${(capture.error ?? "unknown error").split("\n")[0]}).`,
+              "warning",
+            );
+          }
+          return;
+        }
+
         if (!capture.ok) {
           if (!tryClaimGate("qa")) return;
           qaFixAttempts += 1;
@@ -978,7 +1002,7 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Call define_scenarios early for any UI or API behaviour to prove.",
       "Steps must follow the user's repro path in order — open the screen/tab/level they named; no proxy checks on other views.",
-      "Web/canvas/game flows: kind web → write .pi/scenarios/*.spec.ts with clicks/keys + attachConsoleCapture + screenshot + assert on the reported screen.",
+      "Web/canvas/game flows: kind web → write .pi/scenarios/*.spec.ts with clicks/keys + attachConsoleCapture + assertions on the reported screen (plus a screenshot when you can see images).",
       "Do not use browser_* tools to prove the same flows.",
     ],
     parameters: Type.Object({
@@ -1042,8 +1066,8 @@ export default function (pi: ExtensionAPI) {
       "Call run_scenarios before claiming a behavioural task is complete.",
       "Bug fixes: spec must reach the screen/state the user named and assert the symptom is gone — not a shortcut on another screen.",
       "Web specs: prove user flows via interaction — do not inject app state (evaluate, localStorage, globals) to skip clicks the steps describe.",
-      "If run_scenarios passes, the flow is proven — do not browser_screenshot or shell-click to re-verify.",
-      "For layout/size bugs: one spec with before/after screenshots in the same test, then run_scenarios — do not code-read in a loop.",
+      "If run_scenarios passes, the flow is proven — do not re-verify it another way (browser_* tools, shell clicks).",
+      "For layout/size bugs: one spec that captures before and after in the same test — screenshots when you can see images, measured boxes (boundingBox) when you cannot — then run_scenarios. Do not code-read in a loop.",
       "Load visual-ui-debug skill when the user reports overlap, wrong size, wrong screen content, or visual regressions.",
     ],
     parameters: Type.Object({

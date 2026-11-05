@@ -116,6 +116,8 @@ export interface CriticPromptOptions {
   passNumber: number;
   passCap: number;
   hasScreenshot: boolean;
+  /** The session model cannot see images and nothing describes them: judge from the code only. */
+  blind?: boolean;
   /** Weaknesses already open on this surface (so the critic can confirm or clear them). */
   priorOpen: OpenWeakness[];
 }
@@ -126,7 +128,9 @@ export interface CriticPromptOptions {
  */
 export function buildSelfCritiquePrompt(o: CriticPromptOptions): string {
   const areas = [...CRITIC_AREAS, ...ultimateAreas(o.level)].map((a) => `- ${a}`).join("\n");
-  const shot = o.hasScreenshot
+  const shot = o.blind
+    ? "You cannot see images, so judge this surface from its markup and styles: open its files. Name only weaknesses you can point to in the code; leave how it finally looks to the user."
+    : o.hasScreenshot
     ? "The current screenshot of this surface is attached."
     : "No screenshot could be captured — open the surface's files and judge from the markup/styles, or capture it yourself with capture_page_screenshot.";
   const prior =
