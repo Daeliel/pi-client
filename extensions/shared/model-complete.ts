@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { VisionImageContent } from "../scenarios/vision";
+import { pngPart } from "./webp-to-png";
 
 export type AnyModel = NonNullable<ExtensionContext["model"]>;
 
@@ -37,9 +38,11 @@ export async function completeVision(
 ): Promise<VisionCompleteResult> {
   const maxTokens = opts?.maxTokens ?? 600;
   const signal = opts?.signal;
+  // WebP goes as PNG: a llama.cpp vision model rejects the whole request otherwise.
+  const parts = await Promise.all(images.map((img) => pngPart(img)));
   const context: OneShotContext = {
     systemPrompt: system,
-    messages: [{ role: "user", content: [{ type: "text", text: userText }, ...images], timestamp: Date.now() }],
+    messages: [{ role: "user", content: [{ type: "text", text: userText }, ...parts], timestamp: Date.now() }],
   };
 
   const registry = ctx.modelRegistry as unknown as {

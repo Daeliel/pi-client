@@ -13,14 +13,22 @@ import {
 } from "../shared/vision-relay";
 import { trimImages } from "../shared/image-budget";
 import { checkEyes } from "../shared/eyes";
+import { convertWebpImages } from "../shared/webp-to-png";
 
 export default function (pi: ExtensionAPI) {
-  // Every request carries the whole conversation: keep its images under the byte budget.
+  // Every request carries the whole conversation. WebP images go as PNG (llama.cpp cannot
+  // decode WebP, and one would fail every request after it), then the images are kept
+  // under the byte budget. Images left out stay out for the session, so the start of the
+  // conversation does not change with every screenshot and the server keeps reusing what
+  // it already read.
   let warned = false;
+  const droppedImages = new Set<string>();
   pi.on("context", async (event, ctx) => {
     const budget = loadVisionRelayConfig(ctx.cwd).maxImageBytesPerRequest;
-    const trimmed = trimImages(event.messages, budget);
-    if (!trimmed) return;
+    const png = await convertWebpImages(event.messages);
+    const messages = png ? png.messages : event.messages;
+    const trimmed = trimImages(messages, budget, droppedImages);
+    if (!trimmed) return png ? { messages } : undefined;
     if (!warned && ctx.hasUI) {
       warned = true;
       ctx.ui.notify(
@@ -52,7 +60,11 @@ export default function (pi: ExtensionAPI) {
       );
     }, () => {});
   }
-  pi.on("session_start", async (_event, ctx) => warnIfBlind(ctx));
+  pi.on("session_start", async (_event, ctx) => {
+    droppedImages.clear();
+    warned = false;
+    warnIfBlind(ctx);
+  });
   pi.on("model_select", async (_event, ctx) => warnIfBlind(ctx));
 
   pi.on("input", async (event, ctx) => {
