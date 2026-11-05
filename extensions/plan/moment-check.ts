@@ -6,7 +6,7 @@ import type { PlanConfig } from "./config";
 import { readPoints, type Point } from "./sources";
 import { momentOf, parseExperience, type Experience, type Moment } from "./walkthrough";
 import { runCriticCompletion } from "../polish/critic";
-import { loadVisionRelayConfig, pickRelayModel, sessionSeesImages } from "../shared/vision-relay";
+import { loadVisionRelayConfig, pickRelayModel, relayWanted, sessionSeesImages } from "../shared/vision-relay";
 import { loadVisionImages } from "../scenarios/vision";
 import { loadConfig as loadScenariosConfig } from "../scenarios/config";
 
@@ -128,7 +128,9 @@ export async function screenCheck(ctx: ExtensionContext, screenshot: string, m: 
   if (!fs.existsSync(abs)) return { skipped: `no such screenshot: ${screenshot}` };
   const { images } = await loadVisionImages([abs], loadScenariosConfig(ctx.cwd));
   if (images.length === 0) return { skipped: "the screenshot could not be loaded" };
-  const model = sessionSeesImages(ctx) ? ctx.model : (await pickRelayModel(ctx, loadVisionRelayConfig(ctx.cwd).relayModel)).model;
+  const config = loadVisionRelayConfig(ctx.cwd);
+  const relay = relayWanted(ctx, config) ? (await pickRelayModel(ctx, config.relayModel)).model : null;
+  const model = relay ?? (sessionSeesImages(ctx) ? ctx.model : null);
   if (!model) return { skipped: "no model here can see images (set one with /vision model)" };
   const questions = screenQuestions(m);
   const reply = await runCriticCompletion(

@@ -1,13 +1,15 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   inputImagesToRelay,
-  listVisionModels,
+  listVisionChoices,
   loadVisionRelayConfig,
   persistVisionRelay,
   pickRelayModel,
   presentVisionToSession,
+  relayWanted,
   resolveVisionModel,
   sessionSeesImages,
+  type VisionChoice,
 } from "../shared/vision-relay";
 import { trimImages } from "../shared/image-budget";
 import { checkEyes } from "../shared/eyes";
@@ -56,8 +58,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("input", async (event, ctx) => {
     const images = inputImagesToRelay(event.images);
     if (images.length === 0) return;
-    if (!loadVisionRelayConfig(ctx.cwd).enabled) return;
-    if (sessionSeesImages(ctx)) return;
+    if (!relayWanted(ctx, loadVisionRelayConfig(ctx.cwd))) return;
 
     const intro = event.text.trim() || "User attached image(s).";
     const parts = await presentVisionToSession(ctx, intro, images, [], { source: "user" });
@@ -68,13 +69,68 @@ export default function (pi: ExtensionAPI) {
     return { action: "transform" as const, text, images: [] };
   });
 
+  const NO_VISION_MODEL =
+    "No model that can see images is set up. To add one: load a vision model on a server you already use " +
+    "(LM Studio and Ollama list every loaded model; llama.cpp needs a second server or router mode) on a provider " +
+    'with "liveModels": true, or add a model with "input": ["text", "image"] to ~/.pi/agent/models.json. Then /vision again.';
+
+  const label = (c: VisionChoice) => `${c.spec} · ${c.where}${c.up ? "" : " · not answering"}`;
+
+  /** Pick the model that reads images, and when it is used. Saved for every project. */
+  async function pickInteractively(ctx: ExtensionContext) {
+    const config = loadVisionRelayConfig(ctx.cwd);
+    const choices = await listVisionChoices(ctx);
+    const session = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
+    const others = choices.filter((c) => c.spec !== session);
+    if (others.length === 0) {
+      ctx.ui.notify(NO_VISION_MODEL, "info");
+      return;
+    }
+    const auto = await pickRelayModel(ctx, "");
+    const autoLabel = `Auto — ${auto.model ? `${auto.model.provider}/${auto.model.id} now (same server first, skips ones that are down)` : "none answers now"}`;
+    const offLabel = "Off — no image descriptions";
+    const options = [autoLabel, ...others.map(label), offLabel];
+    const current = config.enabled ? (config.relayModel || "auto") : "off";
+    const picked = await ctx.ui.select(`Model that reads images (now: ${current})`, options);
+    if (!picked) return;
+    if (picked === offLabel) {
+      const file = persistVisionRelay(ctx.cwd, { enabled: false }, "user");
+      ctx.ui.notify(`Vision: off. Images are attached as they are; a model that cannot see gets none. Saved to ${file}.`, "info");
+      return;
+    }
+    const choice = others.find((c) => label(c) === picked);
+    const whenText = "Only when the main model cannot see images";
+    const alwaysText = "Always — also instead of the main model's own vision";
+    const when = await ctx.ui.select("When should it read images?", [whenText, alwaysText]);
+    if (!when) return;
+    const file = persistVisionRelay(
+      ctx.cwd,
+      { enabled: true, relayModel: choice ? choice.spec : "", overrideModelVision: when === alwaysText },
+      "user",
+    );
+    const name = choice ? choice.spec : "auto";
+    const notes = [`Vision: ${name} reads images ${when === alwaysText ? "for every model" : "for models that cannot see"}. Saved to ${file}.`];
+    if (choice && !choice.up) notes.push("Its server is not answering right now — images go undescribed until it is back.");
+    if (choice?.where.startsWith("cloud")) notes.push(`Screenshots and pasted images will be sent to ${choice.where.slice("cloud: ".length)}.`);
+    ctx.ui.notify(notes.join("\n"), choice && !choice.up ? "warning" : "info");
+  }
+
   pi.registerCommand("vision", {
-    description: "Vision relay for text-only sessions — status | model <provider/id> | on | off [project]",
+    description: "Choose the model that reads images (picker) — or status | model <provider/id> | always | only-blind | on | off [project]",
     handler: async (args, ctx) => {
       const parts = args.trim().split(/\s+/).filter(Boolean);
+      if (parts.length === 0 && ctx.hasUI) return pickInteractively(ctx);
       const sub = parts[0]?.toLowerCase() ?? "status";
       const scope = parts[parts.length - 1]?.toLowerCase() === "project" ? "project" : "user";
 
+      if (sub === "always" || sub === "only-blind") {
+        const file = persistVisionRelay(ctx.cwd, { overrideModelVision: sub === "always" }, scope);
+        ctx.ui.notify(
+          `Vision: the chosen model reads images ${sub === "always" ? "for every model, also ones that can see" : "only for models that cannot see"} (saved to ${file}).`,
+          "info",
+        );
+        return;
+      }
       if (sub === "on" || sub === "off") {
         const file = persistVisionRelay(ctx.cwd, { enabled: sub === "on" }, scope);
         ctx.ui.notify(`Vision relay ${sub} (saved to ${file}).`, "info");
@@ -106,18 +162,19 @@ export default function (pi: ExtensionAPI) {
       const session = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none";
       const sees = sessionSeesImages(ctx) ? "sees images" : "text-only";
       const picked = await pickRelayModel(ctx, config.relayModel);
-      const models = listVisionModels(ctx).map((m) => (picked.down.includes(m) ? `${m}  (server not answering)` : m));
+      const models = (await listVisionChoices(ctx)).map(label);
       ctx.ui.notify(
         [
           `Vision relay: ${config.enabled ? "ON" : "OFF"} · model: ${config.relayModel || "(auto)"}` +
             (picked.model ? ` → ${picked.model.provider}/${picked.model.id}` : ` — ${picked.reason}`),
           `Session: ${session} (${sees})` +
-            (sessionSeesImages(ctx) ? " — images attach as usual" : " — screenshots and pasted images are described, not attached"),
+            (relayWanted(ctx, config) ? " — screenshots and pasted images are described, not attached" : " — images attach as usual"),
+          `Used: ${config.overrideModelVision ? "always, also instead of a model's own vision" : "only for models that cannot see"}`,
           "",
-          "Vision-capable models with auth:",
+          "Models that can see images:",
           ...(models.length > 0 ? models.map((m) => `  ${m}`) : ["  (none)"]),
           "",
-          "Set: /vision model <provider/model> [project]   Auto: /vision model auto   Off: /vision off",
+          models.length > 0 ? "Choose: /vision   or /vision model <provider/model> · /vision always|only-blind · /vision off" : NO_VISION_MODEL,
         ].join("\n"),
         "info",
       );

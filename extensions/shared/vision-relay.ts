@@ -20,11 +20,17 @@ export interface VisionRelayConfig {
    * server's request size limit. 0 = no limit. Applies to every session model.
    */
   maxImageBytesPerRequest: number;
+  /**
+   * Use the relay model even when the session model can see images itself — e.g. a
+   * stronger vision model on another server. Off: the relay is for text-only models.
+   */
+  overrideModelVision: boolean;
 }
 
 export const DEFAULT_CONFIG: VisionRelayConfig = {
   enabled: true,
   relayModel: "",
+  overrideModelVision: false,
   maxTokens: 900,
   maxImageBytesPerRequest: 32 * 1024 * 1024,
 };
@@ -103,6 +109,43 @@ export function persistVisionRelay(
 
 export function sessionSeesImages(ctx: ExtensionContext): boolean {
   return Boolean(ctx.model?.input?.includes("image"));
+}
+
+/** Images go to the relay model: the session cannot see them, or the user chose the relay over its own vision. */
+export function relayWanted(ctx: ExtensionContext, config: VisionRelayConfig): boolean {
+  return config.enabled && (!sessionSeesImages(ctx) || config.overrideModelVision);
+}
+
+/** Where a model runs, so the user knows where screenshots go before choosing it. */
+export function whereServed(baseUrl: string | undefined): string {
+  let host = "";
+  try {
+    host = new URL(baseUrl ?? "").hostname.toLowerCase();
+  } catch {
+    return "built in";
+  }
+  if (!host || host === "localhost" || host === "::1" || host === "[::1]" || /^127\./.test(host)) return "this PC";
+  if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/.test(host) || host.endsWith(".local") || host.endsWith(".lan") || !host.includes(".")) return "your network";
+  return `cloud: ${host}`;
+}
+
+export interface VisionChoice {
+  spec: string;
+  where: string;
+  up: boolean;
+}
+
+/** Every model that can see images, with where it runs and whether its server answers. */
+export async function listVisionChoices(ctx: ExtensionContext, isUp: (model: AnyModel) => Promise<boolean> = defaultIsUp): Promise<VisionChoice[]> {
+  const specs = listVisionModels(ctx);
+  return Promise.all(
+    specs.map(async (spec) => {
+      const slash = spec.indexOf("/");
+      const model = ctx.modelRegistry.find(spec.slice(0, slash), spec.slice(slash + 1));
+      const baseUrl = (model as { baseUrl?: string } | undefined)?.baseUrl;
+      return { spec, where: whereServed(baseUrl), up: model ? await isUp(model) : false };
+    }),
+  );
 }
 
 export function listVisionModels(ctx: ExtensionContext): string[] {
@@ -232,6 +275,8 @@ export function formatRelayedMessage(
   paths: string[],
   caption: string,
   relayName: string,
+  /** The user chose the relay over the session model's own vision. */
+  chosen = false,
 ): string {
   const lines = [intro];
   if (paths.length > 0) {
@@ -239,7 +284,9 @@ export function formatRelayedMessage(
   }
   lines.push(
     "",
-    `Vision relay (${relayName}) described the screenshot(s) because the session model is text-only:`,
+    chosen
+      ? `Vision relay (${relayName}) described the screenshot(s) — the user chose it to read images for you:`
+      : `Vision relay (${relayName}) described the screenshot(s) because the session model is text-only:`,
     "",
     caption.trim(),
   );
@@ -265,9 +312,8 @@ export async function presentVisionToSession(
   const config = loadVisionRelayConfig(ctx.cwd);
   const { buildVisionContent, buildVisionMessage } = await import("../scenarios/vision");
   const fromUser = opts.source === "user";
-  if (!config.enabled || sessionSeesImages(ctx)) {
-    return buildVisionContent(intro, images, paths, opts.checklist ?? true);
-  }
+  const attach = () => buildVisionContent(intro, images, paths, opts.checklist ?? true);
+  if (!relayWanted(ctx, config)) return attach();
 
   // A user's pasted image is not a QA screenshot: no QA checklist, and when the model
   // cannot see it, it must ask rather than guess.
@@ -278,6 +324,8 @@ export async function presentVisionToSession(
       : `${buildVisionMessage(intro, paths, opts.checklist ?? true)}\n\n${why}`;
 
   const picked = await pickRelayModel(ctx, config.relayModel);
+  // Chosen over the model's own vision but not reachable now: the model can still look itself.
+  if (!picked.model && sessionSeesImages(ctx)) return attach();
   if (!picked.model) {
     const note =
       `Vision relay: session model is text-only and ${picked.reason}. ` +
@@ -305,7 +353,7 @@ export async function presentVisionToSession(
       if (ctx.hasUI) ctx.ui.notify(note, "warning");
       return [{ type: "text", text: unseen(fromUser ? `the vision relay failed (${err})` : note) }];
     }
-    return [{ type: "text", text: formatRelayedMessage(intro, paths, reply.text, relayName) }];
+    return [{ type: "text", text: formatRelayedMessage(intro, paths, reply.text, relayName, sessionSeesImages(ctx)) }];
   } finally {
     if (ctx.hasUI) ctx.ui.setWorkingMessage();
   }

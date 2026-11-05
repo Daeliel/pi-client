@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildCaptionRequest, formatRelayedMessage, rankRelayCandidates, inputImagesToRelay, pickRelayModel, serverUp, sessionSeesImages } from "./vision-relay";
+import { buildCaptionRequest, formatRelayedMessage, rankRelayCandidates, inputImagesToRelay, listVisionChoices, pickRelayModel, relayWanted, serverUp, sessionSeesImages, whereServed } from "./vision-relay";
 
 describe("formatRelayedMessage", () => {
   it("keeps the intro and adds a labeled description instead of image parts", () => {
@@ -162,3 +162,34 @@ describe("rankRelayCandidates", () => {
   });
 });
 
+
+describe("choosing the model that reads images", () => {
+  it("says where each model runs, so screenshots never leave without the user knowing", () => {
+    assert.equal(whereServed("http://localhost:1234/v1"), "this PC");
+    assert.equal(whereServed("http://127.0.0.1:8080/v1"), "this PC");
+    assert.equal(whereServed("http://169.254.10.20:18000/v1"), "your network");
+    assert.equal(whereServed("http://gpu-box:8000/v1"), "your network");
+    assert.equal(whereServed("http://studio.local:1234/v1"), "your network");
+    assert.equal(whereServed("https://api.example.com/v1"), "cloud: api.example.com");
+  });
+
+  it("the chosen model reads images for a text-only model; for a seeing model only when chosen to", () => {
+    const blind = fakeCtx({ session: { provider: "lab", id: "1bit", image: false }, vision: ["lab/eyes"] });
+    const seeing = fakeCtx({ session: { provider: "lab", id: "vl", image: true }, vision: ["lab/eyes"] });
+    const base = { enabled: true, relayModel: "", maxTokens: 900, maxImageBytesPerRequest: 0, overrideModelVision: false };
+    assert.equal(relayWanted(blind, base), true);
+    assert.equal(relayWanted(seeing, base), false);
+    assert.equal(relayWanted(seeing, { ...base, overrideModelVision: true }), true);
+    assert.equal(relayWanted(blind, { ...base, enabled: false }), false);
+  });
+
+  it("lists every model that can see, with whether its server answers", async () => {
+    const ctx = fakeCtx({ session: { provider: "lab", id: "1bit", image: false }, vision: ["lab/eyes", "far/vl"] });
+    const choices = await listVisionChoices(ctx, async (m) => (m as { id: string }).id === "eyes");
+    assert.deepEqual(choices.map((c) => [c.spec, c.up]), [["lab/eyes", true], ["far/vl", false]]);
+  });
+
+  it("the description says why a seeing model got text", () => {
+    assert.match(formatRelayedMessage("Look.", [], "a red button", "lab/eyes", true), /the user chose it to read images for you/);
+  });
+});

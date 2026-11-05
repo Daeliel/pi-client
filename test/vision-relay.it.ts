@@ -57,5 +57,33 @@ describe("vision relay", () => {
       h.dispose();
     }
   });
-});
 
+  it("a model that can see uses the chosen image reader instead, when the user asked for that", async () => {
+    const h = await createHarness({
+      extensions: [visionRelayExt],
+      input: ["text", "image"],
+      extraModels: [{ id: "eyes", input: ["text", "image"] }],
+    });
+    try {
+      writeProjectConfig(h.cwd, "vision.config.json", { relayModel: "faux/eyes", overrideModelVision: true });
+      const seen: string[] = [];
+      h.faux.setResponses([
+        (context, _opts, _state, model) => {
+          seen.push(`${model.id}:${JSON.stringify(context.messages.at(-1)?.content)}`);
+          return reply("SCREEN: settings\nMATCHES: yes\nBLANK: no\nPROBLEMS: none\nDETAILS: -");
+        },
+        (context, _opts, _state, model) => {
+          seen.push(`${model.id}:${JSON.stringify(context.messages.at(-1)?.content)}`);
+          return reply("ok");
+        },
+      ]);
+      await h.session.prompt("what is on this screen?", { images: [{ type: "image", mimeType: "image/png", data: PIXEL }] });
+      assert.match(seen[0]!, /^eyes:/, "the chosen reader looks first");
+      assert.match(seen[1]!, /^small:/);
+      assert.doesNotMatch(seen[1]!, /"type":"image"/, "the main model gets the description, not the image");
+      assert.match(seen[1]!, /the user chose it to read images for you/);
+    } finally {
+      h.dispose();
+    }
+  });
+});

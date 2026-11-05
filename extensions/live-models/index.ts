@@ -53,6 +53,11 @@ export interface ServedModel {
   capabilities?: string[];
   meta?: { n_ctx?: number };
   architecture?: { input_modalities?: string[] };
+  /**
+   * `"eyes"`: a model the server lists only to read images for another one. It is
+   * offered under /vision and never counted as the main model the server serves.
+   */
+  role?: string;
 }
 
 export function liveProviders(modelsJson: unknown): LiveProvider[] {
@@ -258,6 +263,8 @@ export default async function (pi: ExtensionAPI) {
   const cache = readCache();
   /** What each provider lists now. */
   const current = new Map<string, ProviderModelConfig[]>();
+  /** Per provider: ids the server marks as image readers (role "eyes"). */
+  const eyes = new Map<string, Set<string>>();
   const failed = new Map<string, string>();
 
   async function load(p: LiveProvider, timeoutMs: number, signal?: AbortSignal): Promise<ProviderModelConfig[]> {
@@ -273,6 +280,7 @@ export default async function (pi: ExtensionAPI) {
     }
     const models = served.map((m) => toModelConfig(m, p));
     current.set(p.name, models);
+    eyes.set(p.name, new Set(served.filter((m) => m.role === "eyes").map((m) => m.id)));
     failed.delete(p.name);
     writeCache(p.name, models);
     return models;
@@ -308,8 +316,10 @@ export default async function (pi: ExtensionAPI) {
     });
   }
 
+  /** The main models a server serves — its image readers left out. */
   function servedIds(name: string): string[] {
-    return (current.get(name) ?? []).map((m) => m.id);
+    const helpers = eyes.get(name) ?? new Set<string>();
+    return (current.get(name) ?? []).map((m) => m.id).filter((id) => !helpers.has(id));
   }
 
   /**
@@ -363,7 +373,11 @@ export default async function (pi: ExtensionAPI) {
           /* reported below */
         }
         const ids = servedIds(p.name);
-        lines.push(`${p.name}: ${failed.has(p.name) ? `unreachable (${failed.get(p.name)}); last seen ` : ""}${ids.length ? ids.join(", ") : "nothing"}`);
+        const helpers = [...(eyes.get(p.name) ?? [])];
+        lines.push(
+          `${p.name}: ${failed.has(p.name) ? `unreachable (${failed.get(p.name)}); last seen ` : ""}${ids.length ? ids.join(", ") : "nothing"}` +
+            (helpers.length ? ` · reads images: ${helpers.join(", ")} (/vision)` : ""),
+        );
       }
       ctx.ui.notify(lines.join("\n"), "info");
       await checkCurrent(ctx);
